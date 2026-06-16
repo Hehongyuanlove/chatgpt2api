@@ -252,6 +252,16 @@ curl http://localhost:8000/v1/images/edits \
   }'
 ```
 
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer chatgpt2api" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5-mini",
+    "prompt": "你的模型型号是多少",
+  }'
+```
+
 <details>
 <summary>字段说明</summary>
 <br>
