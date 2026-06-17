@@ -2,16 +2,47 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"os"
 	"strings"
-	"time"
 )
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "server" {
+		runServer()
+		return
+	}
+	runCLI()
+}
+
+func runServer() {
+	cfg := LoadConfig()
+	log.Printf("Starting server on %s", cfg.Listen)
+	log.Printf("Session dir: %s", cfg.SessionDir)
+	if cfg.Proxy != "" {
+		log.Printf("Proxy: %s", cfg.Proxy)
+	}
+	if cfg.APIKey != "" {
+		log.Printf("API auth enabled")
+	}
+
+	pool := NewSessionPool(cfg)
+	if err := pool.LoadDir(cfg.SessionDir); err != nil {
+		log.Fatalf("Load sessions: %v", err)
+	}
+	log.Printf("Loaded %d sessions", len(pool.sessions))
+
+	pool.Start()
+	defer pool.Stop()
+
+	if err := startServer(cfg, pool); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
+}
+
+func runCLI() {
 	if len(os.Args) < 2 {
-		log.Fatal("Usage: chatApiGo [-proxy <url>] [-force-refresh] <session.json>")
+		log.Fatal("Usage: chatApiGo server | chatApiGo [-proxy <url>] [-force-refresh] <session.json>")
 	}
 
 	proxyURL := ""
@@ -57,7 +88,7 @@ func main() {
 	}
 
 	expiresIn := jwtExpiresIn(session.Token())
-	log.Printf("Token expires in: %s", expiresIn.Round(time.Second))
+	log.Printf("Token expires in: %s", expiresIn.Round(1))
 	if session.NeedsRefresh() {
 		log.Printf("Token needs refresh (threshold: 24h)")
 	} else {
@@ -100,5 +131,5 @@ func main() {
 	}
 
 	out, _ := json.MarshalIndent(result, "", "  ")
-	fmt.Println(string(out))
+	log.Printf("Response: %s", string(out))
 }
