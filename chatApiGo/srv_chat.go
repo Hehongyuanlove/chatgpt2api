@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+type chatResult struct {
+	convID    string
+	messageID string
+}
+
 type chatHandler struct {
 	pool *SessionPool
 	cfg  *Config
@@ -30,39 +35,52 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msgText := buildMessageText(req.Messages, req.ConversationID)
-	if msgText == "" {
-		writeError(w, http.StatusBadRequest, "invalid_request", "no user message found")
-		return
+	ctx := r.Context()
+	opencodeSessionID := r.Header.Get("X-Session-Id")
+
+	chatgptConvID := req.ConversationID
+	chatgptParentMsgID := req.ParentMessageID
+	if chatgptConvID == "" {
+		storedConvID, storedParentMsgID := h.pool.GetConvState(opencodeSessionID)
+		if storedConvID != "" {
+			chatgptConvID = storedConvID
+			chatgptParentMsgID = storedParentMsgID
+		}
 	}
 
-	ctx := r.Context()
-	sess, err := h.pool.AcquireSticky(ctx, req.ConversationID)
+	sess, err := h.pool.AcquireSticky(ctx, chatgptConvID)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "session_unavailable", "no session available: "+err.Error())
 		return
 	}
 	defer h.pool.Release(sess)
 
+	msgText := buildMessageText(req.Messages, chatgptConvID)
+	if msgText == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "no user message found")
+		return
+	}
+
 	requestID := makeRequestID()
 	model := convertModel(req.Model)
 
-	var convID string
+	var result chatResult
 	if req.Stream {
-		convID = h.handleStream(w, r, sess, msgText, req.ConversationID, req.ParentMessageID, requestID, model, ctx)
+		result = h.handleStream(w, r, sess, msgText, chatgptConvID, chatgptParentMsgID, requestID, model, ctx)
 	} else {
-		convID = h.handleNonStream(w, r, sess, msgText, req.ConversationID, req.ParentMessageID, requestID, model, ctx)
+		result = h.handleNonStream(w, r, sess, msgText, chatgptConvID, chatgptParentMsgID, requestID, model, ctx)
 	}
-	if convID != "" {
-		h.pool.BindConversation(convID, sess)
+	if result.convID != "" {
+		h.pool.BindConversation(result.convID, sess)
+		h.pool.SetConvState(opencodeSessionID, result.convID, result.messageID)
 	}
 }
 
-func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context) string {
+func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context) chatResult {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "stream_error", "streaming not supported")
-		return convID
+		return chatResult{convID: convID}
 	}
 
 	createdAt := time.Now().Unix()
@@ -75,7 +93,7 @@ func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess 
 	header.Created = createdAt
 	if _, err := w.Write([]byte(formatSSE(header))); err != nil {
 		log.Printf("write stream header: %v", err)
-		return convID
+		return chatResult{convID: convID}
 	}
 	flusher.Flush()
 
@@ -115,10 +133,10 @@ func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess 
 	}
 	w.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()
-	return st.ConvID
+	return chatResult{convID: st.ConvID, messageID: st.MessageID}
 }
 
-func (h *chatHandler) handleNonStream(w http.ResponseWriter, r *http.Request, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context) string {
+func (h *chatHandler) handleNonStream(w http.ResponseWriter, r *http.Request, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context) chatResult {
 	st := NewStreamState()
 	if parentMsgID != "" {
 		st.ParentMsgID = parentMsgID
@@ -136,7 +154,7 @@ func (h *chatHandler) handleNonStream(w http.ResponseWriter, r *http.Request, se
 		log.Printf("conversation error: %v", err)
 		sess.MarkFailed(err)
 		writeError(w, http.StatusBadGateway, "upstream_error", "ChatGPT API error: "+err.Error())
-		return st.ConvID
+		return chatResult{convID: st.ConvID, messageID: st.MessageID}
 	}
 
 	resp := buildNonStreamResponse(st, requestID)
@@ -146,7 +164,7 @@ func (h *chatHandler) handleNonStream(w http.ResponseWriter, r *http.Request, se
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp)
-	return st.ConvID
+	return chatResult{convID: st.ConvID, messageID: st.MessageID}
 }
 
 func init() {

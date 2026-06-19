@@ -47,6 +47,11 @@ func (ms *ManagedSession) available() bool {
 	return ms.State == StateActive || ms.State == StateExpired
 }
 
+type chatgptConvState struct {
+	convID      string
+	parentMsgID string
+}
+
 type SessionPool struct {
 	sessions []*ManagedSession
 	mu       sync.RWMutex
@@ -56,14 +61,16 @@ type SessionPool struct {
 	closeOnce sync.Once
 	wg       sync.WaitGroup
 
-	convSessions map[string]*ManagedSession
+	convSessions   map[string]*ManagedSession
+	opencodeStates map[string]*chatgptConvState
 }
 
 func NewSessionPool(cfg *Config) *SessionPool {
 	return &SessionPool{
-		cfg:          cfg,
-		stopCh:       make(chan struct{}),
-		convSessions: make(map[string]*ManagedSession),
+		cfg:            cfg,
+		stopCh:         make(chan struct{}),
+		convSessions:   make(map[string]*ManagedSession),
+		opencodeStates: make(map[string]*chatgptConvState),
 	}
 }
 
@@ -311,6 +318,28 @@ func (sp *SessionPool) BindConversation(convID string, ms *ManagedSession) {
 	}
 	sp.mu.Lock()
 	sp.convSessions[convID] = ms
+	sp.mu.Unlock()
+}
+
+func (sp *SessionPool) GetConvState(opencodeSessionID string) (string, string) {
+	if opencodeSessionID == "" {
+		return "", ""
+	}
+	sp.mu.RLock()
+	s, ok := sp.opencodeStates[opencodeSessionID]
+	sp.mu.RUnlock()
+	if ok {
+		return s.convID, s.parentMsgID
+	}
+	return "", ""
+}
+
+func (sp *SessionPool) SetConvState(opencodeSessionID, convID, parentMsgID string) {
+	if opencodeSessionID == "" || convID == "" {
+		return
+	}
+	sp.mu.Lock()
+	sp.opencodeStates[opencodeSessionID] = &chatgptConvState{convID: convID, parentMsgID: parentMsgID}
 	sp.mu.Unlock()
 }
 
