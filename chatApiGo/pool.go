@@ -50,6 +50,7 @@ func (ms *ManagedSession) available() bool {
 type chatgptConvState struct {
 	convID      string
 	parentMsgID string
+	toolDesc    string
 }
 
 type SessionPool struct {
@@ -321,25 +322,25 @@ func (sp *SessionPool) BindConversation(convID string, ms *ManagedSession) {
 	sp.mu.Unlock()
 }
 
-func (sp *SessionPool) GetConvState(opencodeSessionID string) (string, string) {
+func (sp *SessionPool) GetConvState(opencodeSessionID string) (string, string, string) {
 	if opencodeSessionID == "" {
-		return "", ""
+		return "", "", ""
 	}
 	sp.mu.RLock()
 	s, ok := sp.opencodeStates[opencodeSessionID]
 	sp.mu.RUnlock()
 	if ok {
-		return s.convID, s.parentMsgID
+		return s.convID, s.parentMsgID, s.toolDesc
 	}
-	return "", ""
+	return "", "", ""
 }
 
-func (sp *SessionPool) SetConvState(opencodeSessionID, convID, parentMsgID string) {
+func (sp *SessionPool) SetConvState(opencodeSessionID, convID, parentMsgID, toolDesc string) {
 	if opencodeSessionID == "" || convID == "" {
 		return
 	}
 	sp.mu.Lock()
-	sp.opencodeStates[opencodeSessionID] = &chatgptConvState{convID: convID, parentMsgID: parentMsgID}
+	sp.opencodeStates[opencodeSessionID] = &chatgptConvState{convID: convID, parentMsgID: parentMsgID, toolDesc: toolDesc}
 	sp.mu.Unlock()
 }
 

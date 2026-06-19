@@ -17,6 +17,7 @@ func main() {
 
 func runServer() {
 	cfg := LoadConfig()
+	loadToolCallPrompt(cfg.PromptDir)
 	log.Printf("Starting server on %s", cfg.Listen)
 	log.Printf("Session dir: %s", cfg.SessionDir)
 	if cfg.Proxy != "" {
@@ -81,6 +82,8 @@ func runCLI() {
 	if proxyURL != "" {
 		log.Printf("Using proxy: %s", proxyURL)
 	}
+
+	loadToolCallPrompt(env("OA_PROMPT_DIR", "prompts"))
 
 	session, err := LoadSession(sessionPath)
 	if err != nil {

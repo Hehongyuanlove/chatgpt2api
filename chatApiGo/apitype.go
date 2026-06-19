@@ -1,5 +1,7 @@
 package main
 
+import "encoding/json"
+
 type ChatCompletionRequest struct {
 	Model            string              `json:"model"`
 	Messages         []ChatMessage       `json:"messages"`
@@ -10,11 +12,37 @@ type ChatCompletionRequest struct {
 	User             string              `json:"user,omitempty"`
 	ConversationID   string              `json:"conversation_id,omitempty"`
 	ParentMessageID  string              `json:"parent_message_id,omitempty"`
+	Tools            []Tool              `json:"tools,omitempty"`
+	ToolChoice       interface{}         `json:"tool_choice,omitempty"`
 }
 
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+}
+
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function ToolCallFunction `json:"function"`
+}
+
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type Tool struct {
+	Type     string       `json:"type"`
+	Function ToolFunction `json:"function"`
+}
+
+type ToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 type ChatCompletionResponse struct {
@@ -49,8 +77,9 @@ type ChunkChoice struct {
 }
 
 type Delta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string     `json:"role,omitempty"`
+	Content   string     `json:"content,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type Usage struct {

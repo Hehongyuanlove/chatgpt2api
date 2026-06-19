@@ -40,11 +40,13 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	chatgptConvID := req.ConversationID
 	chatgptParentMsgID := req.ParentMessageID
+	cachedToolDesc := ""
 	if chatgptConvID == "" {
-		storedConvID, storedParentMsgID := h.pool.GetConvState(opencodeSessionID)
+		storedConvID, storedParentMsgID, storedToolDesc := h.pool.GetConvState(opencodeSessionID)
 		if storedConvID != "" {
 			chatgptConvID = storedConvID
 			chatgptParentMsgID = storedParentMsgID
+			cachedToolDesc = storedToolDesc
 		}
 	}
 
@@ -55,7 +57,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.pool.Release(sess)
 
-	msgText := buildMessageText(req.Messages, chatgptConvID)
+	msgText := buildMessageText(req.Messages, chatgptConvID, req.Tools, cachedToolDesc)
 	if msgText == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "no user message found")
 		return
@@ -72,7 +74,8 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if result.convID != "" {
 		h.pool.BindConversation(result.convID, sess)
-		h.pool.SetConvState(opencodeSessionID, result.convID, result.messageID)
+		toolDesc := buildToolDescriptions(req.Tools)
+		h.pool.SetConvState(opencodeSessionID, result.convID, result.messageID, toolDesc)
 	}
 }
 
@@ -125,7 +128,7 @@ func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess 
 	}
 
 	if !st.Finished {
-		done := buildStreamDone(requestID, model)
+		done := buildStreamDone(requestID, model, st)
 		done.Created = createdAt
 		done.ConversationID = st.ConvID
 		w.Write([]byte(formatSSE(done)))

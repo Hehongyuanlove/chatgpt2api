@@ -13,6 +13,7 @@ type Config struct {
 	APIKey         string
 	MaxConcurrency int
 	Strategy       string
+	PromptDir      string
 }
 
 func LoadConfig() *Config {
@@ -23,6 +24,7 @@ func LoadConfig() *Config {
 		APIKey:         env("OA_API_KEY", ""),
 		MaxConcurrency: envInt("OA_MAX_CONCURRENT", 1),
 		Strategy:       env("OA_SESSION_STRATEGY", "round-robin"),
+		PromptDir:      env("OA_PROMPT_DIR", "prompts"),
 	}
 	if cfg.Proxy == "" {
 		for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
