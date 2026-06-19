@@ -57,7 +57,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.pool.Release(sess)
 
-	msgText := buildMessageText(req.Messages, chatgptConvID, req.Tools, cachedToolDesc)
+	msgText := buildMessageText(req.Messages, chatgptConvID, req.Tools, cachedToolDesc, false)
 	if msgText == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "no user message found")
 		return
@@ -76,6 +76,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.pool.BindConversation(result.convID, sess)
 		toolDesc := buildToolDescriptions(req.Tools)
 		h.pool.SetConvState(opencodeSessionID, result.convID, result.messageID, toolDesc)
+		h.pool.SetConvToolHash(result.convID, hashTools(req.Tools))
 	}
 }
 

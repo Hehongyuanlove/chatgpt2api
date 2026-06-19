@@ -15,6 +15,7 @@ type Config struct {
 	Strategy       string
 	PromptDir      string
 	CleanStaleConv bool
+	CacheTools     bool
 }
 
 func LoadConfig() *Config {
@@ -27,6 +28,7 @@ func LoadConfig() *Config {
 		Strategy:       env("OA_SESSION_STRATEGY", "round-robin"),
 		PromptDir:      env("OA_PROMPT_DIR", "prompts"),
 		CleanStaleConv: envBool("OA_CLEAN_STALE_CONV", false),
+		CacheTools:     envBool("OA_CACHE_TOOLS", true),
 	}
 	if cfg.Proxy == "" {
 		for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {

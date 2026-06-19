@@ -56,6 +56,7 @@ type chatgptConvState struct {
 type convBinding struct {
 	AccountID string    `json:"accountID"`
 	LastUsed  time.Time `json:"lastUsed"`
+	ToolHash  string    `json:"toolHash"`
 }
 
 type convStateFile struct {
@@ -452,6 +453,31 @@ func (sp *SessionPool) SetConvState(opencodeSessionID, convID, parentMsgID, tool
 	}
 	sp.mu.Lock()
 	sp.opencodeStates[opencodeSessionID] = &chatgptConvState{ConvID: convID, ParentMsgID: parentMsgID, ToolDesc: toolDesc}
+	sp.mu.Unlock()
+	sp.saveConvState()
+}
+
+func (sp *SessionPool) GetConvToolHash(convID string) string {
+	if convID == "" {
+		return ""
+	}
+	sp.mu.RLock()
+	b, ok := sp.convSessions[convID]
+	sp.mu.RUnlock()
+	if ok {
+		return b.ToolHash
+	}
+	return ""
+}
+
+func (sp *SessionPool) SetConvToolHash(convID, toolHash string) {
+	if convID == "" {
+		return
+	}
+	sp.mu.Lock()
+	if b, ok := sp.convSessions[convID]; ok {
+		b.ToolHash = toolHash
+	}
 	sp.mu.Unlock()
 	sp.saveConvState()
 }

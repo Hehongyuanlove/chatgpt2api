@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -48,47 +49,9 @@ func (st *StreamState) Reset(msg string) {
 	st.RoleSent = false
 }
 
-func buildMessageText(messages []ChatMessage, convID string, tools []Tool, cachedToolDesc string) string {
-	if convID != "" {
-		var parts []string
-
-		toolDesc := cachedToolDesc
-		if toolDesc == "" {
-			toolDesc = buildToolDescriptions(tools)
-		}
-		if toolDesc != "" {
-			parts = append(parts, "REMINDER - You must use the available functions for all calculations:\n\n"+toolDesc)
-		}
-
-		for _, m := range messages {
-			switch m.Role {
-			case "system":
-				if m.Content != "" && toolDesc == "" {
-					parts = append(parts, m.Content)
-				}
-			case "assistant":
-				if m.Content != "" {
-					parts = append(parts, m.Content)
-				}
-				for _, tc := range m.ToolCalls {
-					parts = append(parts, "Tool call: "+tc.Function.Name+"("+tc.Function.Arguments+")")
-				}
-			case "tool":
-				parts = append(parts, "Tool result ("+m.ToolCallID+"): "+m.Content)
-			}
-		}
-		for i := len(messages) - 1; i >= 0; i-- {
-			if messages[i].Role == "user" {
-				if len(parts) > 0 {
-					return strings.Join(parts, "\n") + "\n" + messages[i].Content
-				}
-				return messages[i].Content
-			}
-		}
-		if len(parts) > 0 {
-			return strings.Join(parts, "\n")
-		}
-		return ""
+func buildMessageText(messages []ChatMessage, convID string, tools []Tool, _ string, _ bool) string {
+	if convID != "" && len(messages) > 0 {
+		return messages[len(messages)-1].Content
 	}
 	msg, _ := buildChatGPTPayload(messages, tools)
 	return msg
@@ -241,6 +204,16 @@ func sseEventToChunk(event SSEEvent, st *StreamState) []ChatCompletionChunk {
 	}
 
 	if event.Message != nil && event.Message.Author != nil {
+		// Skip internal tool messages (bio memory updates, commentary, etc.)
+		if event.Message.Recipient == "bio" || event.Message.Channel == "commentary" {
+			if event.Message.Status == "finished_successfully" {
+				st.mu.Lock()
+				st.Finished = true
+				st.mu.Unlock()
+			}
+			return chunks
+		}
+
 		role := event.Message.Author.Role
 		content := ""
 		if event.Message.Content != nil && len(event.Message.Content.Parts) > 0 {
@@ -463,6 +436,18 @@ func loadToolCallPrompt(promptDir string) {
 	}
 	toolCallPromptTmpl = string(data)
 	log.Printf("Loaded tool call prompt from %s (%d bytes)", path, len(data))
+}
+
+func hashTools(tools []Tool) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(tools)
+	if err != nil {
+		return ""
+	}
+	h := sha256.Sum256(data)
+	return fmt.Sprintf("%x", h)
 }
 
 func init() {
