@@ -158,9 +158,31 @@ func convertModel(model string) string {
 
 func parseToolCallsFromContent(content string) []ToolCall {
 	content = strings.TrimSpace(content)
-	if !strings.HasPrefix(content, "{") || !strings.HasSuffix(content, "}") {
+	braceIdx := strings.Index(content, "{")
+	if braceIdx < 0 {
 		return nil
 	}
+	content = content[braceIdx:]
+
+	depth := 0
+	endIdx := -1
+	for i, c := range content {
+		switch c {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				endIdx = i + 1
+				goto parse
+			}
+		}
+	}
+	return nil
+
+parse:
+	content = content[:endIdx]
+
 	var parsed struct {
 		ToolCalls []ToolCall `json:"tool_calls"`
 	}
@@ -206,11 +228,6 @@ func sseEventToChunk(event SSEEvent, st *StreamState) []ChatCompletionChunk {
 	if event.Message != nil && event.Message.Author != nil {
 		// Skip internal tool messages (bio memory updates, commentary, etc.)
 		if event.Message.Recipient == "bio" || event.Message.Channel == "commentary" {
-			if event.Message.Status == "finished_successfully" {
-				st.mu.Lock()
-				st.Finished = true
-				st.mu.Unlock()
-			}
 			return chunks
 		}
 

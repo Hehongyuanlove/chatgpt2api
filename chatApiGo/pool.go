@@ -517,6 +517,209 @@ func (sp *SessionPool) Stats() map[string]interface{} {
 	return stats
 }
 
+type deltaProcessor struct {
+	messages       map[string]*SSEMessage
+	convID         string
+	events         []SSEEvent
+	lastPath       string
+	lastOp         string
+}
+
+func newDeltaProcessor() *deltaProcessor {
+	return &deltaProcessor{messages: make(map[string]*SSEMessage)}
+}
+
+func (dp *deltaProcessor) feed(payload []byte) ([]SSEEvent, bool) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil, false
+	}
+
+	_, hasV := raw["v"]
+	_, hasO := raw["o"]
+	_, hasP := raw["p"]
+	if !hasV && !hasO && !hasP {
+		return nil, false // not delta format
+	}
+
+	dp.events = dp.events[:0]
+
+	// Batch patch: {"o": "patch", "v": [{...}, ...]}
+	if opRaw, ok := raw["o"]; ok {
+		var opStr string
+		if json.Unmarshal(opRaw, &opStr) == nil && opStr == "patch" {
+			var batch struct {
+				Patches []struct {
+					Path string          `json:"p"`
+					Op   string          `json:"o"`
+					Val  json.RawMessage `json:"v"`
+				} `json:"v"`
+			}
+			if json.Unmarshal(payload, &batch) == nil {
+				for _, p := range batch.Patches {
+					dp.lastPath = p.Path
+					dp.lastOp = p.Op
+					dp.applySingle(p.Path, p.Op, p.Val)
+				}
+			}
+			dp.flushFinished()
+			return dp.events, true
+		}
+	}
+
+	// Full add / full delta: "v" contains SSEEvent-like structure
+	if val, ok := raw["v"]; ok {
+		var inner map[string]json.RawMessage
+		if json.Unmarshal(val, &inner) == nil {
+			if _, hasMsg := inner["message"]; hasMsg {
+				var event SSEEvent
+				if json.Unmarshal(val, &event) == nil {
+					if event.ConversationID != "" {
+						dp.convID = event.ConversationID
+					}
+					if event.Message != nil && event.Message.ID != "" {
+						dp.messages[event.Message.ID] = event.Message
+					}
+					dp.events = append(dp.events, event)
+				}
+				dp.flushFinished()
+				return dp.events, true
+			}
+		}
+
+		// "v" might be a simple value for a patch
+		if pathStr, hasPath := raw["p"]; hasPath {
+			var ps string
+			json.Unmarshal(pathStr, &ps)
+			op := opStr(raw)
+			dp.lastPath = ps
+			dp.lastOp = op
+			dp.applySingle(ps, op, val)
+			dp.flushFinished()
+			return dp.events, true
+		}
+
+		// Bare value continuation: {"v": "..."} — continue last path/op
+		if !hasO && !hasP && dp.lastPath != "" {
+			dp.applySingle(dp.lastPath, dp.lastOp, val)
+			dp.flushFinished()
+			return dp.events, true
+		}
+	}
+
+	// Single patch with "p" and "o"
+	if pathStr, hasP := raw["p"]; hasP {
+		var ps string
+		json.Unmarshal(pathStr, &ps)
+		op := opStr(raw)
+		dp.lastPath = ps
+		dp.lastOp = op
+		var val json.RawMessage
+		if v, ok := raw["v"]; ok {
+			val = v
+		}
+		dp.applySingle(ps, op, val)
+		dp.flushFinished()
+		return dp.events, true
+	}
+
+	return dp.events, true
+}
+
+func opStr(raw map[string]json.RawMessage) string {
+	if o, ok := raw["o"]; ok {
+		var s string
+		json.Unmarshal(o, &s)
+		return s
+	}
+	return ""
+}
+
+func (dp *deltaProcessor) applySingle(path, op string, val json.RawMessage) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 2 || parts[0] != "message" {
+		return
+	}
+
+	msgID := ""
+	for id := range dp.messages {
+		msgID = id
+		break
+	}
+	if msgID == "" {
+		return
+	}
+	msg, ok := dp.messages[msgID]
+	if !ok {
+		return
+	}
+
+	switch {
+	case len(parts) == 2 && parts[1] == "status":
+		var s string
+		if json.Unmarshal(val, &s) == nil {
+			msg.Status = s
+		}
+
+	case len(parts) == 2 && parts[1] == "end_turn":
+		var et interface{}
+		if json.Unmarshal(val, &et) == nil {
+			msg.EndTurn = et
+		}
+
+	case len(parts) == 2 && parts[1] == "recipient":
+		var r string
+		if json.Unmarshal(val, &r) == nil {
+			msg.Recipient = r
+		}
+
+	case len(parts) >= 4 && parts[1] == "content" && parts[2] == "parts" && parts[3] == "0":
+		if msg.Content == nil {
+			msg.Content = &SSEContent{ContentType: "text"}
+		}
+		if op == "append" {
+			var s string
+			if json.Unmarshal(val, &s) == nil {
+				if len(msg.Content.Parts) == 0 {
+					msg.Content.Parts = []string{s}
+				} else {
+					msg.Content.Parts[0] += s
+				}
+			}
+		} else if op == "replace" {
+			var s string
+			if json.Unmarshal(val, &s) == nil {
+				msg.Content.Parts = []string{s}
+			}
+		}
+
+	case len(parts) == 3 && parts[1] == "metadata":
+		var meta map[string]interface{}
+		if json.Unmarshal(val, &meta) == nil {
+			if msg.Metadata == nil {
+				msg.Metadata = meta
+			} else {
+				for k, v := range meta {
+					msg.Metadata[k] = v
+				}
+			}
+		}
+	}
+}
+
+func (dp *deltaProcessor) flushFinished() {
+	for id, msg := range dp.messages {
+		if msg.Status == "finished_successfully" {
+			event := SSEEvent{
+				ConversationID: dp.convID,
+				Message:        msg,
+			}
+			dp.events = append(dp.events, event)
+			delete(dp.messages, id)
+		}
+	}
+}
+
 func (ms *ManagedSession) SendStream(
 	ctx context.Context,
 	msg string,
@@ -569,6 +772,9 @@ func (ms *ManagedSession) SendStream(
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 
+	deltaEncoded := false
+	dp := newDeltaProcessor()
+
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
@@ -578,18 +784,36 @@ func (ms *ManagedSession) SendStream(
 
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data:") {
+			// Check for delta_encoding header
+			if strings.HasPrefix(line, "event: delta_encoding") {
+				deltaEncoded = true
+			}
 			continue
 		}
-		payload := strings.TrimSpace(line[5:])
-		if payload == "" {
+		pl := strings.TrimSpace(line[5:])
+		if pl == "" {
 			continue
 		}
-		if payload == "[DONE]" {
+		if pl == "[DONE]" {
 			break
 		}
 
+		if deltaEncoded {
+			events, handled := dp.feed([]byte(pl))
+			if handled {
+				for _, event := range events {
+					if err := onEvent(event); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			// Not delta format — fall through to flat SSEEvent
+		}
+
+		// Flat SSEEvent format (type, input_message, server_ste_metadata, etc.)
 		var event SSEEvent
-		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		if err := json.Unmarshal([]byte(pl), &event); err != nil {
 			continue
 		}
 

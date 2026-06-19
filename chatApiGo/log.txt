@@ -1,0 +1,5 @@
+2026-06-19  log init
+system start ok
+session pool empty
+health check pending
+debug: gateway ready

@@ -129,6 +129,44 @@ func TestBuildMessageTextWithConvID(t *testing.T) {
 	})
 }
 
+func TestParseToolCallsFromContent(t *testing.T) {
+	t.Run("pure json tool calls", func(t *testing.T) {
+		content := `{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"memory","arguments":"{}"}}]}`
+		calls := parseToolCallsFromContent(content)
+		if len(calls) != 1 {
+			t.Fatalf("expected 1 call, got %d", len(calls))
+		}
+		if calls[0].Function.Name != "memory" {
+			t.Fatalf("expected memory, got %s", calls[0].Function.Name)
+		}
+	})
+
+	t.Run("json tool calls with trailing text", func(t *testing.T) {
+		content := `{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"memory","arguments":"{}"}}]}\n\n已经存储到记忆`
+		calls := parseToolCallsFromContent(content)
+		if len(calls) != 1 {
+			t.Fatalf("expected 1 call, got %d", len(calls))
+		}
+		if calls[0].Function.Name != "memory" {
+			t.Fatalf("expected memory, got %s", calls[0].Function.Name)
+		}
+	})
+
+	t.Run("no tool calls in content", func(t *testing.T) {
+		calls := parseToolCallsFromContent("hello world")
+		if calls != nil {
+			t.Fatalf("expected nil, got %v", calls)
+		}
+	})
+
+	t.Run("empty content", func(t *testing.T) {
+		calls := parseToolCallsFromContent("")
+		if calls != nil {
+			t.Fatalf("expected nil, got %v", calls)
+		}
+	})
+}
+
 func TestHashToolsConsistencyWithJSON(t *testing.T) {
 	tools := []Tool{
 		{Type: "function", Function: ToolFunction{Name: "get_weather", Description: "Get weather", Parameters: json.RawMessage(`{"type":"object"}`)}},
