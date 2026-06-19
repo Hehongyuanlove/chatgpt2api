@@ -1,13 +1,15 @@
 package main
 
 type ChatCompletionRequest struct {
-	Model       string              `json:"model"`
-	Messages    []ChatMessage       `json:"messages"`
-	Stream      bool                `json:"stream"`
-	MaxTokens  int                  `json:"max_tokens"`
-	Temperature float64             `json:"temperature"`
-	TopP       float64              `json:"top_p"`
-	User       string               `json:"user,omitempty"`
+	Model            string              `json:"model"`
+	Messages         []ChatMessage       `json:"messages"`
+	Stream           bool                `json:"stream"`
+	MaxTokens        int                 `json:"max_tokens"`
+	Temperature      float64             `json:"temperature"`
+	TopP             float64             `json:"top_p"`
+	User             string              `json:"user,omitempty"`
+	ConversationID   string              `json:"conversation_id,omitempty"`
+	ParentMessageID  string              `json:"parent_message_id,omitempty"`
 }
 
 type ChatMessage struct {
@@ -16,12 +18,13 @@ type ChatMessage struct {
 }
 
 type ChatCompletionResponse struct {
-	ID      string         `json:"id"`
-	Object  string         `json:"object"`
-	Created int64          `json:"created"`
-	Model   string         `json:"model"`
-	Choices []ResponseChoice `json:"choices"`
-	Usage   *Usage         `json:"usage,omitempty"`
+	ID             string            `json:"id"`
+	Object         string            `json:"object"`
+	Created        int64             `json:"created"`
+	Model          string            `json:"model"`
+	Choices        []ResponseChoice  `json:"choices"`
+	Usage          *Usage            `json:"usage,omitempty"`
+	ConversationID string            `json:"conversation_id,omitempty"`
 }
 
 type ResponseChoice struct {
@@ -31,11 +34,12 @@ type ResponseChoice struct {
 }
 
 type ChatCompletionChunk struct {
-	ID      string       `json:"id"`
-	Object  string       `json:"object"`
-	Created int64        `json:"created"`
-	Model   string       `json:"model"`
-	Choices []ChunkChoice `json:"choices"`
+	ID             string         `json:"id"`
+	Object         string         `json:"object"`
+	Created        int64          `json:"created"`
+	Model          string         `json:"model"`
+	Choices        []ChunkChoice  `json:"choices"`
+	ConversationID string         `json:"conversation_id,omitempty"`
 }
 
 type ChunkChoice struct {
@@ -65,6 +69,35 @@ type ModelInfo struct {
 type ModelsResponse struct {
 	Object string      `json:"object"`
 	Data   []ModelInfo `json:"data"`
+}
+
+type ConversationListItem struct {
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	CreatedAt float64 `json:"created_at,omitempty"`
+	UpdatedAt float64 `json:"updated_at,omitempty"`
+}
+
+type ConversationListResponse struct {
+	Object  string                 `json:"object"`
+	Data    []ConversationListItem `json:"data"`
+	HasMore bool                   `json:"has_more"`
+	FirstID string                 `json:"first_id,omitempty"`
+	LastID  string                 `json:"last_id,omitempty"`
+}
+
+type HistoryMessage struct {
+	ID         string  `json:"id"`
+	Role       string  `json:"role"`
+	Content    string  `json:"content"`
+	CreateTime float64 `json:"create_time,omitempty"`
+}
+
+type ConversationHistoryResponse struct {
+	ID        string           `json:"id"`
+	Title     string           `json:"title,omitempty"`
+	CreatedAt float64          `json:"created_at,omitempty"`
+	Messages  []HistoryMessage `json:"messages"`
 }
 
 type APIError struct {

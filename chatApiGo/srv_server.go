@@ -15,9 +15,12 @@ func startServer(cfg *Config, pool *SessionPool) error {
 
 	chatHandler := &chatHandler{pool: pool, cfg: cfg}
 	modelsHandler := &modelsHandler{pool: pool}
+	convHandler := &conversationsHandler{pool: pool, cfg: cfg}
 
 	mux.HandleFunc("/v1/chat/completions", chatHandler.ServeHTTP)
 	mux.HandleFunc("/v1/models", modelsHandler.ServeHTTP)
+	mux.HandleFunc("/v1/conversations", convHandler.ServeHTTP)
+	mux.HandleFunc("/v1/conversations/", convHandler.ServeHTTP)
 	mux.HandleFunc("/health", healthHandler)
 
 	var h http.Handler = mux

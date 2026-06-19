@@ -30,7 +30,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msgText, _ := buildChatGPTPayload(req.Messages)
+	msgText := buildMessageText(req.Messages, req.ConversationID)
 	if msgText == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "no user message found")
 		return
@@ -48,9 +48,9 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	model := convertModel(req.Model)
 
 	if req.Stream {
-		h.handleStream(w, r, sess, msgText, "", "", requestID, model, ctx)
+		h.handleStream(w, r, sess, msgText, req.ConversationID, req.ParentMessageID, requestID, model, ctx)
 	} else {
-		h.handleNonStream(w, r, sess, msgText, "", "", requestID, model, ctx)
+		h.handleNonStream(w, r, sess, msgText, req.ConversationID, req.ParentMessageID, requestID, model, ctx)
 	}
 }
 
@@ -105,6 +105,7 @@ func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess 
 	if !st.Finished {
 		done := buildStreamDone(requestID, model)
 		done.Created = createdAt
+		done.ConversationID = st.ConvID
 		w.Write([]byte(formatSSE(done)))
 		flusher.Flush()
 	}

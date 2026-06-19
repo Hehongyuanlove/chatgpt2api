@@ -405,6 +405,9 @@ func toFloat64(v interface{}) float64 {
 	switch val := v.(type) {
 	case float64:
 		return val
+	case string:
+		f, _ := strconv.ParseFloat(val, 64)
+		return f
 	case int:
 		return float64(val)
 	case int64:

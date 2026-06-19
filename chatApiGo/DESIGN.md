@@ -224,3 +224,15 @@ go run . server
 
 # 多session + 鉴权 + 代理
 OA_SESSION_DIR=./sessions OA_API_KEY=sk-xxx OA_PROXY=http://127.0.0.1:7890 go run . server
+
+
+# 测试连续对话
+cd chatApiGo && OA_LISTEN=:18080 go run . server
+
+# 新对话
+curl -s http://localhost:18080/v1/chat/completions \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hi"}],"stream":false}'
+
+# 注意拿 returned conversation_id, 继续对话
+curl -s http://localhost:18080/v1/chat/completions \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"继续"}],"stream":true,"conversation_id":"上次的id"}'

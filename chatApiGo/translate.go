@@ -43,6 +43,19 @@ func (st *StreamState) Reset(msg string) {
 	st.RoleSent = false
 }
 
+func buildMessageText(messages []ChatMessage, convID string) string {
+	if convID != "" {
+		for i := len(messages) - 1; i >= 0; i-- {
+			if messages[i].Role == "user" {
+				return messages[i].Content
+			}
+		}
+		return ""
+	}
+	msg, _ := buildChatGPTPayload(messages)
+	return msg
+}
+
 func buildChatGPTPayload(messages []ChatMessage) (msgText string, systemHint string) {
 	var parts []string
 	for _, m := range messages {
@@ -145,14 +158,18 @@ func sseEventToChunk(event SSEEvent, st *StreamState) []ChatCompletionChunk {
 			}
 
 			if delta.Content != "" || finishReason != nil {
-				chunks = append(chunks, ChatCompletionChunk{
+				chunk := ChatCompletionChunk{
 					Object: "chat.completion.chunk",
 					Choices: []ChunkChoice{{
 						Index:        idx,
 						Delta:        delta,
 						FinishReason: finishReason,
 					}},
-				})
+				}
+				if finishReason != nil && st.ConvID != "" {
+					chunk.ConversationID = st.ConvID
+				}
+				chunks = append(chunks, chunk)
 			}
 		}
 
@@ -183,10 +200,11 @@ func buildNonStreamResponse(st *StreamState, requestID string) ChatCompletionRes
 	}
 	content := st.Content.String()
 	return ChatCompletionResponse{
-		ID:      "chatcmpl-" + requestID,
-		Object:  "chat.completion",
-		Created: time.Now().Unix(),
-		Model:   model,
+		ID:             "chatcmpl-" + requestID,
+		Object:         "chat.completion",
+		Created:        time.Now().Unix(),
+		Model:          model,
+		ConversationID: st.ConvID,
 		Choices: []ResponseChoice{{
 			Index:        0,
 			Message:      ChatMessage{Role: "assistant", Content: content},
