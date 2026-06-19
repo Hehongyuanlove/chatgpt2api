@@ -8,6 +8,8 @@ import (
 )
 
 func main() {
+	_ = LoadEnvFile(".env")
+
 	if len(os.Args) >= 2 && os.Args[1] == "server" {
 		runServer()
 		return
@@ -42,27 +44,17 @@ func runServer() {
 }
 
 func runCLI() {
-	if len(os.Args) < 2 {
-		log.Fatal("Usage: chatApiGo server | chatApiGo [-proxy <url>] [-force-refresh] <session.json>")
+	sessionPath := env("OA_SESSION", "")
+	if sessionPath == "" {
+		if len(os.Args) >= 2 {
+			sessionPath = os.Args[1]
+		}
+	}
+	if sessionPath == "" {
+		log.Fatal("Usage: OA_SESSION=<path> OA_PROXY=<url> OA_FORCE_REFRESH=true chatApiGo")
 	}
 
-	proxyURL := ""
-	forceRefresh := false
-	sessionPath := os.Args[1]
-	for i, arg := range os.Args[1:] {
-		if arg == "-proxy" && i+2 < len(os.Args[1:]) {
-			proxyURL = os.Args[2]
-			sessionPath = os.Args[3]
-			break
-		}
-		if arg == "-force-refresh" {
-			forceRefresh = true
-			idx := i + 1
-			if idx < len(os.Args[1:]) && os.Args[idx+1][0] != '-' {
-				sessionPath = os.Args[idx+1]
-			}
-		}
-	}
+	proxyURL := env("OA_PROXY", "")
 	if proxyURL == "" {
 		for _, env := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
 			if v := os.Getenv(env); v != "" {
@@ -82,6 +74,8 @@ func runCLI() {
 	if proxyURL != "" {
 		log.Printf("Using proxy: %s", proxyURL)
 	}
+
+	forceRefresh := env("OA_FORCE_REFRESH", "") == "true"
 
 	loadToolCallPrompt(env("OA_PROMPT_DIR", "prompts"))
 

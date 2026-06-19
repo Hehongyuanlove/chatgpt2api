@@ -4,9 +4,11 @@
 
 ```
 chatApiGo/
+├── .env.example         # 环境变量模板
 ├── DESIGN.md            # 本设计文档
 ├── main.go              # 入口: server 子命令启动服务
 ├── config.go            # 配置结构体 + 环境变量加载
+├── env.go               # .env 文件加载器
 ├── apitype.go           # OpenAI API 请求/响应类型定义
 ├── pool.go              # SessionPool: 多session管理, 刷新, 健康检查
 ├── translate.go         # 翻译: OpenAI ↔ ChatGPT 格式转换
@@ -122,18 +124,26 @@ ManagedSession {
 - `corsMiddleware` — 允许跨域
 - `rateLimitMiddleware` — 令牌桶限速
 
-### 4. 配置文件 (`config.go`)
+### 4. 配置 (`config.go` + `env.go`)
 
-环境变量驱动:
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `OA_ENV` | `dev` | 运行环境 |
-| `OA_LISTEN` | `:8080` | 监听地址 |
-| `OA_SESSION_DIR` | `.` | session JSON 目录 |
-| `OA_PROXY` | `` | HTTP/SOCKS5 代理 |
-| `OA_API_KEY` | `` | API 鉴权密钥 (空=不鉴权) |
-| `OA_MAX_CONCURRENT` | `1` | 每 session 最大并发 |
-| `OA_SESSION_STRATEGY` | `round-robin` | 选session策略 |
+**两层配置加载**:
+1. 启动时 `main()` 调用 `LoadEnvFile(".env")` — 读取项目根目录 `.env` 文件, 注入 `os.Setenv` (不覆盖已有环境变量)
+2. `LoadConfig()` / `runCLI()` 通过 `os.Getenv` / `env()` 读取
+
+环境变量驱动 (所有配置):
+| 变量 | 默认 | 适用模式 | 说明 |
+|------|------|----------|------|
+| `OA_LISTEN` | `:8080` | server | 监听地址 |
+| `OA_SESSION_DIR` | `.` | server | session JSON 目录 |
+| `OA_SESSION` | — | CLI | session 文件路径 (CLI 模式必填) |
+| `OA_PROXY` | — | both | HTTP/SOCKS5 代理; 若空则回退 `HTTPS_PROXY` → `HTTP_PROXY` → `ALL_PROXY` |
+| `OA_API_KEY` | — | server | API 鉴权密钥 (空=不鉴权) |
+| `OA_MAX_CONCURRENT` | `1` | server | 每 session 最大并发 |
+| `OA_SESSION_STRATEGY` | `round-robin` | server | 选 session 策略 |
+| `OA_PROMPT_DIR` | `prompts` | both | 提示词模板目录 |
+| `OA_FORCE_REFRESH` | `false` | CLI | 强制刷新 token |
+
+**`env.go`** — `LoadEnvFile(path)` 解析 `KEY=VALUE` 格式文件, 跳过空行和 `#` 注释。已有环境变量不会被覆盖, 确保 shell env 优先级高于 `.env` 文件。
 
 ### 5. OpenAI API 类型 (`apitype.go`)
 
@@ -205,11 +215,18 @@ type ChatCompletionChunk struct {
 ## 启动方式
 
 ```bash
-# 简单启动
+# 通过 .env 文件 (推荐)
+# 1. 复制 .env.example 为 .env, 按需修改
+# 2. 直接启动
 go run . server
 
-# 多 session + 鉴权 + 代理
+# 或通过 shell 环境变量
 OA_SESSION_DIR=./sessions OA_API_KEY=sk-xxx OA_PROXY=http://127.0.0.1:7890 go run . server
+
+# CLI 模式 (env 驱动)
+OA_SESSION=./session.json OA_PROXY=http://127.0.0.1:7890 go run .
+# 或通过 .env 设置 OA_SESSION + OA_PROXY, 然后直接:
+go run .
 
 # 启动后自动加载 session 目录下所有 .json 文件
 ```
