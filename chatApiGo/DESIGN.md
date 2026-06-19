@@ -31,25 +31,26 @@ chatApiGo/
 ```
 Client (OpenAI SDK/curl)
     │ POST /v1/chat/completions (stream=true/false)
+    │ GET  /v1/conversations[/{id}]
     ▼
-┌──────────────────────┐
-│  srv_middleware.go    │  API Key 鉴权 + CORS
-└──────────┬───────────┘
-┌──────────▼───────────┐
-│  srv_chat.go         │  处理器入口
-└──────────┬───────────┘
-┌──────────▼───────────┐
-│  translate.go        │  请求翻译: OpenAI→ChatGPT内部格式
-└──────────┬───────────┘
-┌──────────▼───────────┐
-│  pool.go             │  SessionPool → 选会话 → 获取许可证
-└──────────┬───────────┘
-┌──────────▼───────────┐
-│  现有 Client         │  Bootstrap → Sentinel → SendConversation
-└──────────┬───────────┘
-┌──────────▼───────────┐
-│  translate.go        │  响应翻译: ChatGPT SSE → OpenAI delta
-└──────────┬───────────┘
+┌──────────────────────────┐
+│  srv_middleware.go       │  API Key 鉴权 + CORS
+└──────────┬───────────────┘
+┌──────────▼───────────────┐
+│  srv_chat.go             │  处理器入口
+│  srv_conversations.go    │  对话列表/历史
+└──────────┬───────────────┘
+┌──────────▼───────────────┐
+│  pool.go: AcquireSticky  │  粘性选择: convID→session 映射优先
+│            / Acquire     │  无convID → round-robin 兜底
+└──────────┬───────────────┘
+┌──────────▼───────────────┐
+│  ManagedSession          │  Bootstrap → Sentinel → SendConversation
+└──────────┬───────────────┘
+┌──────────▼───────────────┐
+│  translate.go            │  响应翻译: ChatGPT SSE → OpenAI delta
+│  流完成后 → BindConv()   │  convID 回写到 convSessions 映射
+└──────────┬───────────────┘
     ▼ SSE stream / JSON response
 Client
 ```
@@ -62,9 +63,10 @@ Client
 
 ```
 SessionPool {
-    sessions []*ManagedSession
-    mu       sync.RWMutex
-    strategy SelectionStrategy  // round-robin
+    sessions     []*ManagedSession
+    mu           sync.RWMutex
+    convSessions map[string]*ManagedSession  // conversation_id → session 粘性映射
+    next         uint64                      // round-robin 计数器
 }
 
 ManagedSession {
@@ -82,10 +84,13 @@ ManagedSession {
 
 **功能**:
 - `LoadFromDir(dir string)` — 扫描目录下所有 `.json` 文件加载为 session
-- `Acquire() (*ManagedSession, error)` — 获取最健康可用的会话 (blocking)
+- `Acquire() (*ManagedSession, error)` — round-robin 获取可用会话 (blocking)
+- `AcquireSticky(ctx, convID) (*ManagedSession, error)` — 粘性获取: 优先返回 convID 绑定的会话; 无映射或会话不可用时降级为普通 Acquire
+- `BindConversation(convID, ms)` — 将 conversation_id 绑定到 ManagedSession, 后续请求路由到同一会话
 - `Release(sess *ManagedSession)` — 归还会话
 - 后台刷新协程: 每30分钟检查所有会话, 需要刷新时自动执行
 - 错误追踪: 连续失败 N 次标记为 `cooldown`, 冷却后重试
+- 粘性映射自动清理: 绑定会话进入 cooldown/banned 时, 下次请求自动删除旧映射
 
 ### 2. 翻译层 (`translate.go`)
 
@@ -107,7 +112,10 @@ ManagedSession {
 **路由**:
 - `POST /v1/chat/completions` — 流式/非流式聊天补全
 - `GET /v1/models` — 可用模型列表
-- `GET /v1/dashboard` — (可选) 会话状态面板
+- `GET /v1/conversations` — 会话列表
+- `GET /v1/conversations/{id}` — 会话历史
+- `GET /health` — 健康检查 `{"status":"ok"}`
+- `GET /v1/dashboard` — 会话池统计 `pool.Stats()`
 
 **中间件**:
 - `apiKeyMiddleware` — 检查 `Authorization: Bearer <key>` (配置为空则跳过)
@@ -162,16 +170,28 @@ type ChatCompletionChunk struct {
 
 1. Client → `POST /v1/chat/completions`
 2. `srv_middleware.go` → 验证 API Key (若配置)
-3. `srv_chat.go` → 解析 JSON body
+3. `srv_chat.go` → 解析 JSON body, 提取 `conversation_id`
 4. `translate.go: OpenAIRequest → ChatGPT messages`
-5. `pool.Acquire()` → 获得 `ManagedSession`
+5. `pool.AcquireSticky(ctx, conversation_id)` — 若 convID 有绑定则直接返回该会话; 否则 round-robin
 6. `ManagedSession.client.Bootstrap()` (若未初始化)
 7. `ManagedSession.client.GetChatRequirements()` → Sentinel 令牌
 8. `ManagedSession.client.SendConversation()` → ChatGPT API
-9. `sse.go` 逐行解析响应, 同时 `translate.go` 转换为 OpenAI 格式
+9. `translate.go: SSE → OpenAI delta` 逐行解析, 提取 `conversation_id`
 10. 流式: 逐块 `flusher.Flush()` 发送 `data: {...}\n\n`
 11. 非流式: 合并块, 发送完整 JSON
-12. `pool.Release()`
+12. `pool.BindConversation(convID, sess)` — 将响应中的 conversation_id 绑定到当前会话
+13. `pool.Release()`
+
+### 粘性会话 (Sticky Session)
+
+**问题**: 多 ChatGPT 账号 (session) 共享一个池。轮询分配会导致对话 A 在 session 1 创建, 但后续请求落到 session 2, 引发 "conversation not found" 错误。
+
+**方案**: `convSessions map` 维护 conversation_id → ManagedSession 映射。
+
+- **绑定时机**: 对话创建/继续的 SSE 响应完成后, 调用 `BindConversation()` 写入映射
+- **查找时机**: 请求携带 `conversation_id` 时, `AcquireSticky()` 优先查映射
+- **降级**: 绑定会话繁忙/失效 → 自动删除映射, 降级为 round-robin
+- **历史接口**: `GET /v1/conversations/{id}` 同样走粘性路由, 同时建立映射
 
 ## 错误处理
 
@@ -182,57 +202,55 @@ type ChatCompletionChunk struct {
 | Sentinel 失败 | 502 | `{"error":{"code":"upstream_error"}}` |
 | 会话不可用 | 503 | `{"error":{"code":"session_unavailable"}}` |
 
-## 后续可扩展
+## 启动方式
 
-1. 会话健康检测: 定期发送 ping 请求验证
-2. 请求队列: 所有会话繁忙时排队等待
-3. 多用户鉴权: 多 API Key + 会话绑定
-4. 指标暴露: Prometheus `/metrics`
-5. Tools/Function Calling 支持
-6. Vision (多模态) 支持
-7. Dockerfile + docker-compose
+```bash
+# 简单启动
+go run . server
 
+# 多 session + 鉴权 + 代理
+OA_SESSION_DIR=./sessions OA_API_KEY=sk-xxx OA_PROXY=http://127.0.0.1:7890 go run . server
 
+# 启动后自动加载 session 目录下所有 .json 文件
+```
 
-chatApiGo server > /tmp/server.log 2>&1 &
-SERVER_PID=$!
-sleep 3
+## 快速测试
 
+```bash
+# 新对话
+curl -s http://localhost:8080/v1/chat/completions \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hi"}],"stream":false}'
+
+# 拿到响应中的 conversation_id, 继续对话
+curl -s http://localhost:8080/v1/chat/completions \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"继续"}],"stream":true,"conversation_id":"<conv_id>"}'
+
+# 流式测试
 curl -sN http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"say hi in german"}],"stream":true}' \
   --max-time 120
+```
 
+## 功能验证
 
-测试	结果
-GET /health	{"status":"ok"}
-GET /v1/models	8 模型列表
-API Key 鉴权 (无key)	401 {"error":{"code":"unauthorized"}}
-API Key 鉴权 (有效key)	200
-POST /v1/chat/completions (非流式)	"Hello, nice day! 👋"
-POST /v1/chat/completions (流式)	增量 SSE chunks + [DONE]
-核心流程验证:
-请求 → API Key检查 → session池获取 → Bootstrap → Sentinel
-→ conversation API → SSE解析 → delta diff → OpenAI格式响应
-已实现功能:
-- SessionPool: 多session加载, 30min自动刷新token, 并发控制, 失败冷却
-- 翻译层: OpenAI ↔ ChatGPT 互转, delta 去重, 模型映射
-- API层: CORS, API Key 鉴权, 流式/非流式, 优雅关闭
-启动方式:
-# 简单启动
-go run . server
+| 测试 | 预期 |
+|------|------|
+| GET /health | `{"status":"ok"}` |
+| GET /v1/models | 模型列表 |
+| POST 聊天 (非流式) | JSON 响应含 choices |
+| POST 聊天 (流式) | SSE chunks → `[DONE]` |
+| API Key 鉴权 (无 key) | 401 |
+| API Key 鉴权 (有效 key) | 200 |
+| 连续对话 (带 conversation_id) | 同一 session 处理 |
+| 对话历史 GET /v1/conversations/{id} | 消息列表 |
 
-# 多session + 鉴权 + 代理
-OA_SESSION_DIR=./sessions OA_API_KEY=sk-xxx OA_PROXY=http://127.0.0.1:7890 go run . server
+## 后续可扩展
 
-
-# 测试连续对话
-cd chatApiGo && OA_LISTEN=:18080 go run . server
-
-# 新对话
-curl -s http://localhost:18080/v1/chat/completions \
-  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hi"}],"stream":false}'
-
-# 注意拿 returned conversation_id, 继续对话
-curl -s http://localhost:18080/v1/chat/completions \
-  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"继续"}],"stream":true,"conversation_id":"上次的id"}'
+1. 会话健康检测 — 定期 ping 验证
+2. 请求队列 — 全部繁忙时排队
+3. 多用户鉴权 — 多 API Key + session 绑定
+4. 指标暴露 — Prometheus `/metrics`
+5. Tools / Function Calling
+6. Vision (多模态)
+7. Dockerfile + docker-compose

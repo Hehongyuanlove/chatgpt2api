@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -21,7 +22,14 @@ func startServer(cfg *Config, pool *SessionPool) error {
 	mux.HandleFunc("/v1/models", modelsHandler.ServeHTTP)
 	mux.HandleFunc("/v1/conversations", convHandler.ServeHTTP)
 	mux.HandleFunc("/v1/conversations/", convHandler.ServeHTTP)
-	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/v1/dashboard", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(pool.Stats())
+	})
 
 	var h http.Handler = mux
 	h = corsMiddleware(h)
@@ -55,8 +63,4 @@ func startServer(cfg *Config, pool *SessionPool) error {
 	return srv.Shutdown(ctx)
 }
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
-}
+

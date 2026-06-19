@@ -61,7 +61,7 @@ func (h *conversationsHandler) handleList(w http.ResponseWriter, r *http.Request
 
 func (h *conversationsHandler) handleHistory(w http.ResponseWriter, r *http.Request, convID string) {
 	ctx := r.Context()
-	sess, err := h.pool.Acquire(ctx)
+	sess, err := h.pool.AcquireSticky(ctx, convID)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "session_unavailable", "no session available: "+err.Error())
 		return
@@ -73,6 +73,8 @@ func (h *conversationsHandler) handleHistory(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadGateway, "upstream_error", "ChatGPT API error: "+err.Error())
 		return
 	}
+
+	h.pool.BindConversation(convID, sess)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)

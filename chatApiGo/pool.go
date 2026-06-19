@@ -55,10 +55,16 @@ type SessionPool struct {
 	stopCh   chan struct{}
 	closeOnce sync.Once
 	wg       sync.WaitGroup
+
+	convSessions map[string]*ManagedSession
 }
 
 func NewSessionPool(cfg *Config) *SessionPool {
-	return &SessionPool{cfg: cfg, stopCh: make(chan struct{})}
+	return &SessionPool{
+		cfg:          cfg,
+		stopCh:       make(chan struct{}),
+		convSessions: make(map[string]*ManagedSession),
+	}
 }
 
 func (sp *SessionPool) LoadDir(dir string) error {
@@ -66,6 +72,7 @@ func (sp *SessionPool) LoadDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("read session dir: %w", err)
 	}
+	fmt.Printf("FILE                      EMAIL                              REMAIN     EXPIRES                       PLAN\n")
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -75,11 +82,11 @@ func (sp *SessionPool) LoadDir(dir string) error {
 			log.Printf("WARN: skip %s: %v", e.Name(), err)
 			continue
 		}
-		log.Printf("Loaded session: %s", e.Name())
 	}
 	if len(sp.sessions) == 0 {
 		return fmt.Errorf("no valid session files found in %s", dir)
 	}
+	fmt.Printf("Total: %d session(s)\n", len(sp.sessions))
 	return nil
 }
 
@@ -88,6 +95,19 @@ func (sp *SessionPool) LoadFile(path string) error {
 	if err != nil {
 		return err
 	}
+
+	email := ""
+	if sess.User != nil {
+		email = sess.User.Email
+	}
+	plan := ""
+	if sess.Account != nil {
+		plan = sess.Account.PlanType
+	}
+	remain := calcRemain(sess.Expires)
+	fmt.Printf("%-25s %-35s %-10s %-28s %s\n",
+		filepath.Base(path), email, remain, sess.Expires, plan)
+
 	client, err := NewClient(sess, sp.cfg.Proxy)
 	if err != nil {
 		return fmt.Errorf("create client for %s: %w", path, err)
@@ -262,6 +282,38 @@ func (sp *SessionPool) Release(ms *ManagedSession) {
 	atomic.AddInt64(&ms.InFlight, -1)
 }
 
+func (sp *SessionPool) AcquireSticky(ctx context.Context, convID string) (*ManagedSession, error) {
+	if convID != "" {
+		sp.mu.RLock()
+		ms, ok := sp.convSessions[convID]
+		sp.mu.RUnlock()
+		if ok && ms.available() {
+			select {
+			case ms.Sem <- struct{}{}:
+				atomic.AddInt64(&ms.InFlight, 1)
+				ms.lastUsed = time.Now()
+				return ms, nil
+			default:
+			}
+		}
+		if ok {
+			sp.mu.Lock()
+			delete(sp.convSessions, convID)
+			sp.mu.Unlock()
+		}
+	}
+	return sp.Acquire(ctx)
+}
+
+func (sp *SessionPool) BindConversation(convID string, ms *ManagedSession) {
+	if convID == "" {
+		return
+	}
+	sp.mu.Lock()
+	sp.convSessions[convID] = ms
+	sp.mu.Unlock()
+}
+
 func (ms *ManagedSession) MarkFailed(err error) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
@@ -379,4 +431,22 @@ func (ms *ManagedSession) SendStream(
 	}
 
 	return scanner.Err()
+}
+
+func calcRemain(expires string) string {
+	if expires == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, expires)
+	if err != nil {
+		return "???"
+	}
+	d := time.Until(t)
+	if d <= 0 {
+		return "expired"
+	}
+	if d >= 24*time.Hour {
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+	return fmt.Sprintf("%dh", int(d.Hours()))
 }

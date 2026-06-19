@@ -37,7 +37,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	sess, err := h.pool.Acquire(ctx)
+	sess, err := h.pool.AcquireSticky(ctx, req.ConversationID)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "session_unavailable", "no session available: "+err.Error())
 		return
@@ -47,18 +47,22 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestID := makeRequestID()
 	model := convertModel(req.Model)
 
+	var convID string
 	if req.Stream {
-		h.handleStream(w, r, sess, msgText, req.ConversationID, req.ParentMessageID, requestID, model, ctx)
+		convID = h.handleStream(w, r, sess, msgText, req.ConversationID, req.ParentMessageID, requestID, model, ctx)
 	} else {
-		h.handleNonStream(w, r, sess, msgText, req.ConversationID, req.ParentMessageID, requestID, model, ctx)
+		convID = h.handleNonStream(w, r, sess, msgText, req.ConversationID, req.ParentMessageID, requestID, model, ctx)
+	}
+	if convID != "" {
+		h.pool.BindConversation(convID, sess)
 	}
 }
 
-func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context) {
+func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context) string {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "stream_error", "streaming not supported")
-		return
+		return convID
 	}
 
 	createdAt := time.Now().Unix()
@@ -71,7 +75,7 @@ func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess 
 	header.Created = createdAt
 	if _, err := w.Write([]byte(formatSSE(header))); err != nil {
 		log.Printf("write stream header: %v", err)
-		return
+		return convID
 	}
 	flusher.Flush()
 
@@ -111,9 +115,10 @@ func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess 
 	}
 	w.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()
+	return st.ConvID
 }
 
-func (h *chatHandler) handleNonStream(w http.ResponseWriter, r *http.Request, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context) {
+func (h *chatHandler) handleNonStream(w http.ResponseWriter, r *http.Request, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context) string {
 	st := NewStreamState()
 	if parentMsgID != "" {
 		st.ParentMsgID = parentMsgID
@@ -131,7 +136,7 @@ func (h *chatHandler) handleNonStream(w http.ResponseWriter, r *http.Request, se
 		log.Printf("conversation error: %v", err)
 		sess.MarkFailed(err)
 		writeError(w, http.StatusBadGateway, "upstream_error", "ChatGPT API error: "+err.Error())
-		return
+		return st.ConvID
 	}
 
 	resp := buildNonStreamResponse(st, requestID)
@@ -141,6 +146,7 @@ func (h *chatHandler) handleNonStream(w http.ResponseWriter, r *http.Request, se
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp)
+	return st.ConvID
 }
 
 func init() {
