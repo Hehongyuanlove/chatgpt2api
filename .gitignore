@@ -33,3 +33,4 @@ git_cache/
 loginwithpassword_*/
 logwithemailverifycode_*/
 test_batch_output/
+chatApiGo/session_logs/

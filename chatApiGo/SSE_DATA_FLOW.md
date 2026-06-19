@@ -1,127 +1,6 @@
 # ChatGPT SSE 数据层级与过滤
 
-## SSE 事件层级
-
-```
-data: 行 (两种格式)
-├── 扁平格式 (SSEEvent 直接解析)
-│   ├── type:"resume_conversation_token"   → conv管理/话题恢复
-│   │   └── {token, conversation_id}
-│   ├── type:"input_message"               → 用户消息回显
-│   │   └── input_message: SSEMessage {id, author, content, status, ...}
-│   ├── type:"server_ste_metadata"         → 模型名/plan/metadata
-│   │   └── metadata: SSEServerMetadata {model_slug, plan_type, ...}
-│   ├── type:"message_marker"              → 流位置标记
-│   │   └── {conversation_id, message_id, marker, event}
-│   └── type:"message_stream_complete"     → 流结束信号
-│       └── {conversation_id}
-│
-└── delta编码格式 (deltaProcessor 处理, pool.go)
-    ├── 全量添加: {p:"", o:"add", v:{message:{...}, conversation_id, error}, c:N}
-    │   └── message.content 两种形态:
-    │       ├── standard: {content_type:"text", parts:[""]}
-    │       └── code:     {content_type:"code", language:"json", text:""}
-    │
-    ├── 单patch:   {p:"/message/content/parts/0", o:"append", v:"text"}
-    │   └── o: append | replace
-    │   └── p 路径:
-    │       - /message/content/parts/0
-    │       - /message/content/text
-    │       - /message/status
-    │       - /message/end_turn
-    │       - /message/recipient
-    │       - /message/metadata
-    │
-    ├── 值patch:   {v:"text"} (无路径, 隐式追加到当前 content)
-    │
-    └── 批量patch: {o:"patch", v:[{p,o,v}, ...]}
-```
-
-## SSEMessage 结构
-
-```
-SSEMessage {
-    id         string
-    author     SSEAuthor {role, name, metadata}
-    content    SSEContent {content_type, parts[], language?, text?}
-    status     string     (in_progress | finished_successfully)
-    end_turn   interface{}
-    weight     interface{}
-    metadata   map[string]interface{}
-    recipient  string     (bio | all | assistant)
-    channel    string     (commentary | final)
-    create_time
-}
-```
-
-## 过滤链路
-
-```
-ChatGPT SSE stream
-    │
-    ▼
-SendStream (pool.go)
-    ├── event: delta_encoding  → deltaEncoded = true
-    │
-    ├── deltaEncoded == true
-    │   └── dp.feed(payload)
-    │       ├── 识别 delta 格式 (有 v/o/p 字段)
-    │       ├── 全量添加 → 存入 dp.messages[msgID]
-    │       ├── patch 操作 → 更新 dp.messages[msgID] 的 content/status
-    │       ├── flushFinished → status == "finished_successfully" → 派发 SSEEvent
-    │       └── 非 delta → 返回 handled=false, 走扁平格式
-    │
-    ├── 扁平格式 → json.Unmarshal → SSEEvent → onEvent
-    │
-    ▼
-sseEventToChunk (translate.go)
-    │
-    ├── 过滤 bio/commentary 消息 (recipient==bio || channel==commentary)
-    │   └── 丢弃 (return chunks)
-    │
-    ├── role == "assistant"?
-    │   ├── extractToolCalls(event)     ← metadata.tool_calls / message_type
-    │   ├── parseToolCallsFromContent() ← 内容中的 JSON tool_calls
-    │   │   └── 找到 tool_calls → 清空 content, 只发 tool_calls
-    │   │
-    │   └── content != "" || toolCalls > 0
-    │       ├── delta.Content = content[len(st.LastContent):]  ← 增量 diff
-    │       ├── delta.ToolCalls = toolCalls
-    │       ├── st.Finished = (status == "finished_successfully")
-    │       └── finishReason = "stop" | "tool_calls"
-    │
-    └── role != "assistant" → 跳过
-```
-
-### 具体场景: 记忆存储
-
-收到 `"帮我记一下我的生日10月21"`:
-
-| 事件类型 | recipient | channel | role | content | 过滤结果 |
-|----------|-----------|---------|------|---------|----------|
-| 全量添加 (bio) | bio | commentary | assistant | code/text | ❌ channel==commentary |
-| patch (bio内容) | — | — | — | "10月21生日存储" | ❌ (bio消息已丢弃) |
-| batch patch (bio完成) | — | — | — | finished | ❌ (bio消息已丢弃) |
-| 全量添加 (tool结果) | assistant | commentary | tool | "Model set context updated." | ❌ role!=assistant |
-| 全量添加 (最终) | all | final | assistant | "" | ✅ 通过 |
-| patch (最终内容) | — | — | — | "已记录。" | ✅ 追加到 content |
-| batch patch (最终完成) | — | — | — | finished | ✅ finish_reason:"stop" |
-
-最终输出给客户端: `"已记录。"`
-
-## 关键代码位置
-
-| 功能 | 文件 | 行 |
-|------|------|-----|
-| deltaProcessor 全量添加/patch | pool.go | deltaProcessor.feed() |
-| 消息状态追踪+flush | pool.go | deltaProcessor.flushFinished() |
-| bio/commentary 过滤 | translate.go | sseEventToChunk → recipient/ channel 检查 |
-| 工具调用解析 (metadata) | translate.go | extractToolCalls() |
-| 工具调用解析 (内容JSON) | translate.go | parseToolCallsFromContent() |
-| 内容增量 diff | translate.go | sseEventToChunk → delta.Content 计算 |
-
-
-
+## SSE 携带特殊返回的数据
 event: delta_encoding
 data: "v1"
 
@@ -348,3 +227,54 @@ data: {"type": "message_stream_complete", "conversation_id": "6a3523d9-cad4-83ec
 data: [DONE]
 
 
+## SEE 正常返回的数据
+event: delta_encoding
+data: "v1"
+
+data: {"type": "resume_conversation_token", "kind": "topic", "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb25kdWl0X3V1aWQiOiIwMzY4MjdkMjY5MTA0OGQ0YjMwYjhjMzJjNmRjYzM3ZiIsImNvbmR1aXRfbG9jYXRpb24iOiIxMC4xMjguNzcuMTE5OjgzMDciLCJjbHVzdGVyIjoidW5pZmllZC0xNDkiLCJpYXQiOjE3ODE4OTUwNDMsImV4cCI6MTc4MTkwMjI0MywidHVybl90b3BpY19pZCI6ImNvbnZlcnNhdGlvbi10dXJuLTVjMTBmNGM0LTdjNjMtNDk5YS04ZGQ2LTc5N2E4ZjhmZGRkOSJ9.kkXnwVo_H-JZJDTSI5rzgaSM6oune-t36X0QTdX7uJbKJvwwg9j8V8FuBiYttmdUOVxVDd-I5-hFk9wCpDs4XA", "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9"}
+
+event: delta
+data: {"p": "", "o": "add", "v": {"message": {"id": "e359e267-e385-43bf-b933-a80998bdcdab", "author": {"role": "system", "name": null, "metadata": {}}, "create_time": null, "update_time": null, "content": {"content_type": "text", "parts": [""]}, "status": "finished_successfully", "end_turn": true, "weight": 0.0, "metadata": {"model_switcher_deny": [], "is_visually_hidden_from_conversation": true}, "recipient": "all", "channel": null}, "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9", "error": null, "error_code": null}, "c": 0} 
+
+event: delta
+data: {"v": {"message": {"id": "1d4fa971-9a8e-4a47-bb4c-34c95b280a14", "author": {"role": "system", "name": null, "metadata": {}}, "create_time": null, "update_time": null, "content": {"content_type": "text", "parts": [""]}, "status": "finished_successfully", "end_turn": true, "weight": 0.0, "metadata": {"rebase_developer_message": true, "model_switcher_deny": [], "is_visually_hidden_from_conversation": true}, "recipient": "all", "channel": null}, "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9", "error": null, "error_code": null}, "c": 1}    
+
+event: delta
+data: {"v": {"message": {"id": "7d77857a-a0ef-4823-8660-6be6e2a4212d", "author": {"role": "system", "name": null, "metadata": {}}, "create_time": null, "update_time": null, "content": {"content_type": "text", "parts": [""]}, "status": "finished_successfully", "end_turn": false, "weight": 0.0, "metadata": {"model_switcher_deny": [], "is_visually_hidden_from_conversation": true}, "recipient": "all", "channel": null}, "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9", "error": null, "error_code": null}, "c": 2}     
+
+event: delta
+data: {"v": {"message": {"id": "2e011a5c-4f26-4f28-bb0a-ba0f8b083acf", "author": {"role": "user", "name": null, "metadata": {}}, "create_time": 1781895042.089, "update_time": null, "content": {"content_type": "text", "parts": ["\u4f60\u662f\u4ec0\u4e48\u6a21\u578b\n"]}, "status": "finished_successfully", "end_turn": null, "weight": 1.0, "metadata": {"selected_github_repos": [], "serialization_metadata": {"custom_symbol_offsets": []}, "request_id": "2bd56521-23ca-4476-ab61-8d05da69617c", "message_source": null, "turn_exchange_id": "5c10f4c4-7c63-499a-8dd6-797a8f8fddd9", "working_turn_id": "5c10f4c4-7c63-499a-8dd6-797a8f8fddd9", "resolved_model_slug": "gpt-5-3-mini", "model_switcher_deny": []}, "recipient": "all", "channel": null}, "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9", "error": null, "error_code": null}, "c": 3}    
+
+data: {"type": "input_message", "input_message": {"id": "2e011a5c-4f26-4f28-bb0a-ba0f8b083acf", "author": {"role": "user", "name": null, "metadata": {}}, "create_time": 1781895042.089, "update_time": null, "content": {"content_type": "text", "parts": ["\u4f60\u662f\u4ec0\u4e48\u6a21\u578b\n"]}, "status": "finished_successfully", "end_turn": null, "weight": 1.0, "metadata": {"selected_github_repos": [], "selected_all_github_repos": false, "serialization_metadata": {"custom_symbol_offsets": []}, "request_id": "2bd56521-23ca-4476-ab61-8d05da69617c", "otrace_id": "6a358f8200000000cb90faf9cf13e3f4", "message_source": null, "turn_exchange_id": "5c10f4c4-7c63-499a-8dd6-797a8f8fddd9", "working_turn_id": "5c10f4c4-7c63-499a-8dd6-797a8f8fddd9", "turn_trace_id": "79d0136a-9780-4e38-ac2b-cbb4492a3809", "useragent": {"client_type": "web", "is_mobile": true, "is_mobile_app": false, "is_desktop_app": false, "is_native_app": false, "is_native_app_apple": false, "is_mobile_app_ios": false, "is_desktop_app_macos": false, "is_aura_app_macos": false, "is_aura_web": false, "is_sora_ios": false, "is_agora_ios": false, "is_agora_android": false, "is_desktop_app_windows": false, "is_electron_app": false, "is_mobile_app_android": false, "is_mobile_web": true, "is_mobile_web_ios": false, "is_mobile_web_android": true, "is_ios": false, "is_android": true, "is_macos": false, "is_windows": false, "is_linux": false, "is_chatgpt_client": false, "is_moshi_client": false, "is_sora_client": false, "is_agora_client": false, "is_browserbased_app": true, "is_chatgpt_api": false, "is_slack": false, "is_chatkit_web": false, "is_chatkit_synthetic": false, "is_kakao_talk": false, "is_codex_desktop": false, "is_offline_caching": false, "app_version": null, "build_number": null, "user_agent": "mozilla/5.0 (linux; android 15; pixel 9) applewebkit/537.36 (khtml, like gecko) chrome/149.0.0.0 mobile safari/537.36", "app_environment": null, "os_version": null, "device_model": null, "user_client_type": "android_web"}, "paragen_stream_type": "default", "resolved_model_slug": "gpt-5-3-mini", "parent_id": "7d77857a-a0ef-4823-8660-6be6e2a4212d"}, "recipient": "all", "channel": null}, "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9"}
+
+event: delta
+data: {"v": {"message": {"id": "8ed207f2-e3b8-419c-bd36-536f63c43325", "author": {"role": "assistant", "name": null, "metadata": {}}, "create_time": 1781895043.6313446, "update_time": null, "content": {"content_type": "model_editable_context", "model_set_context": "", "repository": null, "repo_summary": null, "structured_context": null}, "status": "finished_successfully", "end_turn": null, "weight": 1.0, "metadata": {"search_result_groups": [], "request_id": "2bd56521-23ca-4476-ab61-8d05da69617c", "message_type": "next", "turn_exchange_id": "5c10f4c4-7c63-499a-8dd6-797a8f8fddd9", "working_turn_id": "5c10f4c4-7c63-499a-8dd6-797a8f8fddd9", "model_slug": "gpt-5-5", "default_model_slug": "auto", "can_save": false, "parent_id": "2e011a5c-4f26-4f28-bb0a-ba0f8b083acf", "model_switcher_deny": []}, "recipient": "all", "channel": null}, "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9", "error": null, "error_code": null}, "c": 4} 
+
+event: delta
+data: {"v": {"message": {"id": "fa59f604-1dad-4d3e-8e0c-518af5ef6d21", "author": {"role": "assistant", "name": null, "metadata": {}}, "create_time": 1781895043.625966, "update_time": null, "content": {"content_type": "text", "parts": [""]}, "status": "in_progress", "end_turn": null, "weight": 1.0, "metadata": {"citations": [], "content_references": [], "story_events": [], "resolved_model_slug": "gpt-5-3-mini", "request_id": "2bd56521-23ca-4476-ab61-8d05da69617c", "message_type": "next", "turn_exchange_id": "5c10f4c4-7c63-499a-8dd6-797a8f8fddd9", "working_turn_id": "5c10f4c4-7c63-499a-8dd6-797a8f8fddd9", "model_slug": "gpt-5-5", "default_model_slug": "auto", "parent_id": "8ed207f2-e3b8-419c-bd36-536f63c43325", "model_switcher_deny": []}, "recipient": "all", "channel": "final"}, "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9", "error": null, "error_code": null}, "c": 5}    
+
+data: {"type": "message_marker", "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9", "message_id": "fa59f604-1dad-4d3e-8e0c-518af5ef6d21", "marker": "user_visible_token", "event": "first"}
+
+data: {"type": "message_marker", "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9", "message_id": "fa59f604-1dad-4d3e-8e0c-518af5ef6d21", "marker": "final_channel_token", "event": "first"}
+
+event: delta
+data: {"p": "/message/content/parts/0", "o": "append", "v": "\u6211\u662f\u57fa\u4e8e **"}    
+
+event: delta
+data: {"v": "GPT-5.3-mini**"} 
+
+event: delta
+data: {"v": " \u7684 ChatGPT"}
+
+event: delta
+data: {"p": "", "o": "patch", "v": [{"p": "/message/content/parts/0", "o": "append", "v": " \u6a21\u578b\u3002\n"}, {"p": "/message/status", "o": "replace", "v": "finished_successfully"}, {"p": "/message/end_turn", "o": "replace", "v": true}, {"p": "/message/metadata", "o": "append", "v": {"is_complete": true, "can_save": true, "finish_details": {"type": "stop", "stop_tokens": [200002]}, "search_result_groups": []}}]} 
+
+data: {"type": "message_marker", "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9", "message_id": "fa59f604-1dad-4d3e-8e0c-518af5ef6d21", "marker": "last_token", "event": "last"}
+
+data: {"type": "title_generation", "title": "\u6a21\u578b\u4ecb\u7ecd", "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9"}
+
+data: {"type": "server_ste_metadata", "metadata": {"conduit_prewarmed": false, "plan_type": "free", "plan_type_bucket": "free", "user_agent": "web_android", "service": null, "tool_name": null, "tool_invoked": false, "fast_convo": true, "warmup_state": "rewarm", "is_first_turn": true, "cluster_region": "westus3", "model_slug": "gpt-5-3-mini", "region": null, "is_multimodal": null, "did_auto_switch_to_reasoning": false, "auto_switcher_race_winner": null, "is_autoswitcher_enabled": false, "is_search": null, "did_prompt_contain_image": false, "search_tool_call_count": null, "search_tool_query_types": null, "message_id": "2e011a5c-4f26-4f28-bb0a-ba0f8b083acf", "request_id": "2bd56521-23ca-4476-ab61-8d05da69617c", "turn_exchange_id": "5c10f4c4-7c63-499a-8dd6-797a8f8fddd9", "turn_trace_id": "79d0136a-9780-4e38-ac2b-cbb4492a3809", "a32e6ebcb": 1, "resume_with_websockets": true, "low_turn_topic_ttl": false, "streaming_async_status": false, "replace_stream_status": true, "temporal_conversation_turn": false, "pro_mode_turn_topic_streaming": null, "turn_use_case": "thinking", "turn_mode": "default"}, "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9"}
+
+data: {"type": "message_stream_complete", "conversation_id": "6a358f82-7110-83ec-8290-4e12771231e9"}
+
+data: [DONE]

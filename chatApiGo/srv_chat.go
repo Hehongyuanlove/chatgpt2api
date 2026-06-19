@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -24,8 +25,11 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	bodyBytes, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+
 	var req ChatCompletionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid JSON: "+err.Error())
 		return
 	}
@@ -68,7 +72,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var result chatResult
 	if req.Stream {
-		result = h.handleStream(w, r, sess, msgText, chatgptConvID, chatgptParentMsgID, requestID, model, ctx)
+		result = h.handleStream(w, r, sess, msgText, chatgptConvID, chatgptParentMsgID, requestID, model, ctx, string(bodyBytes))
 	} else {
 		result = h.handleNonStream(w, r, sess, msgText, chatgptConvID, chatgptParentMsgID, requestID, model, ctx)
 	}
@@ -80,12 +84,17 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context) chatResult {
+func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context, requestBody string) chatResult {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "stream_error", "streaming not supported")
 		return chatResult{convID: convID}
 	}
+
+	sl := newSessionLog(requestID)
+	defer sl.Close()
+
+	sl.Printf("[STAGE1] incoming request body: %s", requestBody)
 
 	createdAt := time.Now().Unix()
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -110,30 +119,41 @@ func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess 
 	}
 
 	err := sess.SendStream(ctx, msg, convID, parentMsgID, func(event SSEEvent) error {
+		eventJSON, _ := json.Marshal(event)
+		sl.Printf("[STAGE3.5] sseEventToChunk input: %s", string(eventJSON))
 		chunks := sseEventToChunk(event, st)
 		for _, chunk := range chunks {
 			chunk.ID = "chatcmpl-" + requestID
 			chunk.Model = model
 			chunk.Created = createdAt
-			if _, err := w.Write([]byte(formatSSE(chunk))); err != nil {
+			out := formatSSE(chunk)
+			sl.Printf("[STAGE4] returned: %s", out)
+			if _, err := w.Write([]byte(out)); err != nil {
 				return err
 			}
 			flusher.Flush()
 		}
 		return nil
-	})
+	}, sl.Printf)
 
 	if err != nil {
-		log.Printf("stream error: %v", err)
+		sl.Printf("stream error: %v (content so far: %s)", err, st.Content.String())
+		log.Printf("stream error: %v (content so far: %s)", err, st.Content.String())
 		sess.MarkFailed(err)
 	}
 
 	if !st.Finished {
-		done := buildStreamDone(requestID, model, st)
-		done.Created = createdAt
-		done.ConversationID = st.ConvID
-		w.Write([]byte(formatSSE(done)))
-		flusher.Flush()
+		hasContent := st.Content.Len() > 0
+		if err != nil {
+			sl.Printf("SendStream failed, skipping buildStreamDone (had partial content: %v)", hasContent)
+		} else {
+			sl.Printf("SendStream OK but no finished_successfully event (content: %q)", st.Content.String())
+			done := buildStreamDone(requestID, model, st)
+			done.Created = createdAt
+			done.ConversationID = st.ConvID
+			w.Write([]byte(formatSSE(done)))
+			flusher.Flush()
+		}
 	}
 	w.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()
@@ -141,6 +161,9 @@ func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess 
 }
 
 func (h *chatHandler) handleNonStream(w http.ResponseWriter, r *http.Request, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context) chatResult {
+	sl := newSessionLog(requestID)
+	defer sl.Close()
+
 	st := NewStreamState()
 	if parentMsgID != "" {
 		st.ParentMsgID = parentMsgID
@@ -152,7 +175,7 @@ func (h *chatHandler) handleNonStream(w http.ResponseWriter, r *http.Request, se
 	err := sess.SendStream(ctx, msg, convID, parentMsgID, func(event SSEEvent) error {
 		sseEventToChunk(event, st)
 		return nil
-	})
+	}, sl.Printf)
 
 	if err != nil {
 		log.Printf("conversation error: %v", err)

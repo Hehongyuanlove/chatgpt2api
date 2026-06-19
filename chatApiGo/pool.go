@@ -523,6 +523,7 @@ type deltaProcessor struct {
 	events         []SSEEvent
 	lastPath       string
 	lastOp         string
+	lastMsgID      string
 }
 
 func newDeltaProcessor() *deltaProcessor {
@@ -568,24 +569,28 @@ func (dp *deltaProcessor) feed(payload []byte) ([]SSEEvent, bool) {
 	}
 
 	// Full add / full delta: "v" contains SSEEvent-like structure
-	if val, ok := raw["v"]; ok {
-		var inner map[string]json.RawMessage
-		if json.Unmarshal(val, &inner) == nil {
-			if _, hasMsg := inner["message"]; hasMsg {
-				var event SSEEvent
-				if json.Unmarshal(val, &event) == nil {
-					if event.ConversationID != "" {
-						dp.convID = event.ConversationID
+		if val, ok := raw["v"]; ok {
+			var inner map[string]json.RawMessage
+			if json.Unmarshal(val, &inner) == nil {
+				if _, hasMsg := inner["message"]; hasMsg {
+					var event SSEEvent
+					if json.Unmarshal(val, &event) == nil {
+						if event.ConversationID != "" {
+							dp.convID = event.ConversationID
+						}
+						if event.Message != nil && event.Message.ID != "" {
+							// Skip internal bio/commentary messages entirely
+							if event.Message.Recipient == "bio" || event.Message.Channel == "commentary" {
+								return dp.events, true
+							}
+							dp.messages[event.Message.ID] = event.Message
+							dp.lastMsgID = event.Message.ID
+						}
 					}
-					if event.Message != nil && event.Message.ID != "" {
-						dp.messages[event.Message.ID] = event.Message
-					}
-					dp.events = append(dp.events, event)
+					dp.flushFinished()
+					return dp.events, true
 				}
-				dp.flushFinished()
-				return dp.events, true
 			}
-		}
 
 		// "v" might be a simple value for a patch
 		if pathStr, hasPath := raw["p"]; hasPath {
@@ -641,15 +646,10 @@ func (dp *deltaProcessor) applySingle(path, op string, val json.RawMessage) {
 		return
 	}
 
-	msgID := ""
-	for id := range dp.messages {
-		msgID = id
-		break
-	}
-	if msgID == "" {
+	if dp.lastMsgID == "" {
 		return
 	}
-	msg, ok := dp.messages[msgID]
+	msg, ok := dp.messages[dp.lastMsgID]
 	if !ok {
 		return
 	}
@@ -710,6 +710,10 @@ func (dp *deltaProcessor) applySingle(path, op string, val json.RawMessage) {
 func (dp *deltaProcessor) flushFinished() {
 	for id, msg := range dp.messages {
 		if msg.Status == "finished_successfully" {
+			if msg.Recipient == "bio" || msg.Channel == "commentary" {
+				delete(dp.messages, id)
+				continue
+			}
 			event := SSEEvent{
 				ConversationID: dp.convID,
 				Message:        msg,
@@ -725,7 +729,12 @@ func (ms *ManagedSession) SendStream(
 	msg string,
 	convID, parentMsgID string,
 	onEvent func(SSEEvent) error,
+	logFn func(string, ...interface{}),
 ) error {
+	if logFn == nil {
+		logFn = log.Printf
+	}
+
 	if err := ms.Client.ensureToken(); err != nil {
 		return fmt.Errorf("refresh token: %w", err)
 	}
@@ -740,7 +749,14 @@ func (ms *ManagedSession) SendStream(
 
 	req, err := ms.Client.GetChatRequirements()
 	if err != nil {
-		return fmt.Errorf("chat requirements: %w", err)
+		log.Printf("SendStream: GetChatRequirements failed: %v, retrying with re-bootstrap", err)
+		if err2 := ms.Client.Bootstrap(); err2 != nil {
+			return fmt.Errorf("chat requirements after retry bootstrap: %w (original err: %v)", err2, err)
+		}
+		req, err = ms.Client.GetChatRequirements()
+		if err != nil {
+			return fmt.Errorf("chat requirements: %w (after retry)", err)
+		}
 	}
 
 	path := "/backend-api/conversation"
@@ -750,6 +766,7 @@ func (ms *ManagedSession) SendStream(
 
 	payload := ms.Client.conversationPayload(msg, convID, parentMsgID)
 	bodyJSON, _ := json.Marshal(payload)
+	logFn("[STAGE2] sent to ChatGPT: %s", string(bodyJSON))
 
 	httpReq, err := ms.Client.buildReq("POST", "https://chatgpt.com"+path,
 		bytes.NewReader(bodyJSON),
@@ -795,8 +812,11 @@ func (ms *ManagedSession) SendStream(
 			continue
 		}
 		if pl == "[DONE]" {
+			logFn("[STAGE3] received: [DONE]")
 			break
 		}
+
+		logFn("[STAGE3] received raw: %s", pl)
 
 		if deltaEncoded {
 			events, handled := dp.feed([]byte(pl))
