@@ -261,10 +261,13 @@ func sseEventToChunk(event SSEEvent, st *StreamState) []ChatCompletionChunk {
 					st.LastContent = content
 					st.Content.WriteString(delta.Content)
 				}
-				if len(toolCalls) > 0 {
-					delta.ToolCalls = toolCalls
-					st.ToolCalls = toolCalls
+			if len(toolCalls) > 0 {
+				for i := range toolCalls {
+					toolCalls[i].Index = i
 				}
+				delta.ToolCalls = toolCalls
+				st.ToolCalls = toolCalls
+			}
 				if event.Message.ID != "" {
 					st.MessageID = event.Message.ID
 				}

@@ -24,9 +24,10 @@ type ChatMessage struct {
 }
 
 type ToolCall struct {
-	ID       string           `json:"id"`
-	Type     string           `json:"type"`
-	Function ToolCallFunction `json:"function"`
+	ID       string           `json:"id,omitempty"`
+	Type     string           `json:"type,omitempty"`
+	Index    int              `json:"index"`
+	Function ToolCallFunction `json:"function,omitempty"`
 }
 
 type ToolCallFunction struct {
