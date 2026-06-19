@@ -65,23 +65,33 @@ Client
 
 ```
 SessionPool {
-    sessions     []*ManagedSession
-    mu           sync.RWMutex
-    convSessions map[string]*ManagedSession  // conversation_id → session 粘性映射
-    next         uint64                      // round-robin 计数器
+    sessions        []*ManagedSession
+    mu              sync.RWMutex
+    convSessions    map[string]*convBinding     // convID → {accountID, lastUsed}
+    accountSessions map[string]*ManagedSession  // accountID → session
+    opencodeStates  map[string]*chatgptConvState // X-Session-Id → conv 状态
+    statePath       string                      // .conv_state.json 路径
+    next            uint64                      // round-robin 计数器
 }
 
 ManagedSession {
     rawSession  *Session       // 原始Session (从session.json加载)
     client      *Client        // 对应Client实例
-    state       SessionState   // active / expired / cooldown / banned
+    state       SessionState   // active / cooldown / banned
     inFlight    int64          // 当前处理中请求数
     semaphore   chan struct{}  // 最大并发令牌 (默认为1)
     proxyURL    string
     lastUsed    time.Time
     lastError   error
-    failCount   int
+    failCount   int             // 连续失败计数, ≥3 → StateCooldown
+    bootstrapped bool
 }
+
+SessionState:
+- StateActive   — 可用
+- StateCooldown — 连续 3 次失败后自动进入, healthLoop 每 5 分钟重置为 Active
+- StateExpired  — (保留, 当前未用)
+- StateBanned   — (保留, 当前未用)
 ```
 
 **功能**:
@@ -142,6 +152,7 @@ ManagedSession {
 | `OA_SESSION_STRATEGY` | `round-robin` | server | 选 session 策略 |
 | `OA_PROMPT_DIR` | `prompts` | both | 提示词模板目录 |
 | `OA_FORCE_REFRESH` | `false` | CLI | 强制刷新 token |
+| `OA_CLEAN_STALE_CONV` | `false` | server | 启动时自动删除无对应 session 文件的 convID 缓存 |
 
 **`env.go`** — `LoadEnvFile(path)` 解析 `KEY=VALUE` 格式文件, 跳过空行和 `#` 注释。已有环境变量不会被覆盖, 确保 shell env 优先级高于 `.env` 文件。
 
@@ -196,12 +207,24 @@ type ChatCompletionChunk struct {
 
 **问题**: 多 ChatGPT 账号 (session) 共享一个池。轮询分配会导致对话 A 在 session 1 创建, 但后续请求落到 session 2, 引发 "conversation not found" 错误。
 
-**方案**: `convSessions map` 维护 conversation_id → ManagedSession 映射。
+**方案**: 三级映射链 `opencodeStates[外部SessID] → convID → convSessions[convID] → {accountID, lastUsed} → accountSessions[accountID] → ManagedSession`。
 
-- **绑定时机**: 对话创建/继续的 SSE 响应完成后, 调用 `BindConversation()` 写入映射
-- **查找时机**: 请求携带 `conversation_id` 时, `AcquireSticky()` 优先查映射
-- **降级**: 绑定会话繁忙/失效 → 自动删除映射, 降级为 round-robin
+- **绑定时机**: 对话创建/继续的 SSE 响应完成后, 调用 `BindConversation()` + `SetConvState()` 写入映射
+- **查找时机**: 请求携带 `X-Session-Id` 或 `conversation_id` 时, `AcquireSticky()` 沿映射链定位 session
 - **历史接口**: `GET /v1/conversations/{id}` 同样走粘性路由, 同时建立映射
+- **持久化**: 映射自动写入 `<session_dir>/.conv_state.json`, 重启恢复
+- **清理**: 仅 `OA_CLEAN_STALE_CONV=true` 启动时删除无对应 session 文件的 stale 条目
+
+#### AcquireSticky 行为对照表
+
+| 绑定状态 | 条件 | 操作 | 文件 |
+|----------|------|------|------|
+| 无绑定 | `convSessions[convID]` 不存在 | 直接 `Acquire()` round-robin | — |
+| 不存在 session | `accountSessions[accountID]` 找不到 | 删映射 + 关联 opencodeStates | 写文件 |
+| cooldown (冷却) | `!ms.available()` 连续 3 次失败, 5分钟自动恢复 | 跳过, 落 `Acquire()`, **映射保留** | 不动 |
+| banned (封禁) | `!ms.available()` (代码预留, 当前未用) | 跳过, 落 `Acquire()`, **映射保留** | 不动 |
+| 忙 (并发满) | `ms.Sem` 所有槽被占用 | **阻塞等待**, 直到拿到槽或 ctx 取消 | 不动 |
+| 正常 | session 可用且槽空闲 | 直接返回该 session, 更新 `lastUsed` | — |
 
 ## 错误处理
 

@@ -14,6 +14,7 @@ type Config struct {
 	MaxConcurrency int
 	Strategy       string
 	PromptDir      string
+	CleanStaleConv bool
 }
 
 func LoadConfig() *Config {
@@ -25,6 +26,7 @@ func LoadConfig() *Config {
 		MaxConcurrency: envInt("OA_MAX_CONCURRENT", 1),
 		Strategy:       env("OA_SESSION_STRATEGY", "round-robin"),
 		PromptDir:      env("OA_PROMPT_DIR", "prompts"),
+		CleanStaleConv: envBool("OA_CLEAN_STALE_CONV", false),
 	}
 	if cfg.Proxy == "" {
 		for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
@@ -54,4 +56,12 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+func envBool(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	return v == "true" || v == "1" || v == "yes"
 }
