@@ -74,7 +74,7 @@ func (h *conversationsHandler) handleHistory(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	h.pool.BindConversation(convID, sess)
+	h.pool.BindConversation(convID, convID, sess)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)

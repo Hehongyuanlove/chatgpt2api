@@ -40,28 +40,25 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	opencodeSessionID := r.Header.Get("X-Session-Id")
+	sessionID := r.Header.Get("X-Session-Id")
 
 	chatgptConvID := req.ConversationID
-	chatgptParentMsgID := req.ParentMessageID
-	cachedToolDesc := ""
-	if chatgptConvID == "" {
-		storedConvID, storedParentMsgID, storedToolDesc := h.pool.GetConvState(opencodeSessionID)
-		if storedConvID != "" {
-			chatgptConvID = storedConvID
-			chatgptParentMsgID = storedParentMsgID
-			cachedToolDesc = storedToolDesc
+	if chatgptConvID == "" && sessionID != "" {
+		if b := h.pool.GetBinding(sessionID); b != nil && b.ConversationID != "" {
+			chatgptConvID = b.ConversationID
 		}
 	}
+	chatgptParentMsgID := req.ParentMessageID
 
-	sess, err := h.pool.AcquireSticky(ctx, chatgptConvID)
+	sess, err := h.pool.AcquireSticky(ctx, sessionID)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "session_unavailable", "no session available: "+err.Error())
 		return
 	}
 	defer h.pool.Release(sess)
 
-	msgText := buildMessageText(req.Messages, chatgptConvID, req.Tools, cachedToolDesc, false)
+	prevToolHash := h.pool.GetConvToolHash(sessionID)
+	msgText := buildMessageText(req.Messages, chatgptConvID, req.Tools, prevToolHash)
 	if msgText == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "no user message found")
 		return
@@ -77,10 +74,12 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = h.handleNonStream(w, r, sess, msgText, chatgptConvID, chatgptParentMsgID, requestID, model, ctx)
 	}
 	if result.convID != "" {
-		h.pool.BindConversation(result.convID, sess)
-		toolDesc := buildToolDescriptions(req.Tools)
-		h.pool.SetConvState(opencodeSessionID, result.convID, result.messageID, toolDesc)
-		h.pool.SetConvToolHash(result.convID, hashTools(req.Tools))
+		if sessionID == "" {
+			sessionID = result.convID
+		}
+		h.pool.BindConversation(sessionID, result.convID, sess)
+		h.pool.SetConvToolHash(sessionID, hashTools(req.Tools))
+		w.Header().Set("X-Session-Id", sessionID)
 	}
 }
 

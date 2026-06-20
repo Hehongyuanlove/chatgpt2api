@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gibson042/canonicaljson-go"
 	"github.com/google/uuid"
 )
 
@@ -49,12 +50,48 @@ func (st *StreamState) Reset(msg string) {
 	st.RoleSent = false
 }
 
-func buildMessageText(messages []ChatMessage, convID string, tools []Tool, _ string, _ bool) string {
-	if convID != "" && len(messages) > 0 {
-		return messages[len(messages)-1].Content
+func buildMessageText(messages []ChatMessage, convID string, tools []Tool, prevToolHash string) string {
+	isFirstSession := convID == ""
+	currentToolHash := hashTools(tools)
+	toolsChanged := prevToolHash != currentToolHash
+
+	var parts []string
+
+	// history messages (first session only, exclude last)
+	if isFirstSession && len(messages) > 1 {
+		for i := 0; i < len(messages)-1; i++ {
+			m := messages[i]
+			switch m.Role {
+			case "user":
+				parts = append(parts, m.Content)
+			case "assistant":
+				if m.Content != "" {
+					parts = append(parts, m.Content)
+				}
+				for _, tc := range m.ToolCalls {
+					parts = append(parts, "Tool call: "+tc.Function.Name+"("+tc.Function.Arguments+")")
+				}
+			case "tool":
+				parts = append(parts, "Tool result ("+m.ToolCallID+"): "+m.Content)
+			case "system":
+				parts = append(parts, m.Content)
+			}
+		}
 	}
-	msg, _ := buildChatGPTPayload(messages, tools)
-	return msg
+
+	// tool descriptions (first session or tools changed)
+	if (isFirstSession || toolsChanged) && len(tools) > 0 {
+		if desc := buildToolDescriptions(tools); desc != "" {
+			parts = append(parts, desc)
+		}
+	}
+
+	// last message content
+	if len(messages) > 0 {
+		parts = append(parts, messages[len(messages)-1].Content)
+	}
+
+	return strings.Join(parts, "\n")
 }
 
 func buildToolDescriptions(tools []Tool) string {
@@ -92,46 +129,7 @@ func buildToolDescriptions(tools []Tool) string {
 		`{"tool_calls":[{"id":"call_<unique_id>","type":"function","function":{"name":"<function_name>","arguments":"<json_args>"}}]}`
 }
 
-func buildChatGPTPayload(messages []ChatMessage, tools []Tool) (msgText string, systemHint string) {
-	var parts []string
 
-	// Inject tool descriptions + system content as first message
-	var intro strings.Builder
-	for _, m := range messages {
-		if m.Role == "system" && m.Content != "" {
-			intro.WriteString(m.Content)
-			systemHint = m.Content
-			break
-		}
-	}
-	toolDesc := buildToolDescriptions(tools)
-	if toolDesc != "" {
-		if intro.Len() > 0 {
-			intro.WriteString("\n\n")
-		}
-		intro.WriteString(toolDesc)
-	}
-	if intro.Len() > 0 {
-		parts = append(parts, intro.String())
-	}
-
-	for _, m := range messages {
-		switch m.Role {
-		case "user":
-			parts = append(parts, m.Content)
-		case "assistant":
-			if m.Content != "" {
-				parts = append(parts, m.Content)
-			}
-			for _, tc := range m.ToolCalls {
-				parts = append(parts, "Tool call: "+tc.Function.Name+"("+tc.Function.Arguments+")")
-			}
-		case "tool":
-			parts = append(parts, "Tool result ("+m.ToolCallID+"): "+m.Content)
-		}
-	}
-	return strings.Join(parts, "\n"), systemHint
-}
 
 func convertModel(model string) string {
 	switch model {
@@ -196,6 +194,7 @@ parse:
 		if parsed.ToolCalls[i].Type == "" {
 			parsed.ToolCalls[i].Type = "function"
 		}
+		parsed.ToolCalls[i].Index = i
 	}
 	return parsed.ToolCalls
 }
@@ -253,13 +252,22 @@ func sseEventToChunk(event SSEEvent, st *StreamState) []ChatCompletionChunk {
 					st.RoleSent = true
 				}
 				if content != "" {
-					if len(content) > len(st.LastContent) {
-						delta.Content = content[len(st.LastContent):]
-					} else if content != st.LastContent {
-						delta.Content = content
+					// Suppress partial tool_calls JSON leaking as text content
+					// during streaming. parseToolCallsFromContent already failed
+					// above, so this content is either incomplete JSON or
+					// genuinely not tool_calls.
+					trimmed := strings.TrimSpace(content)
+					isPartialToolCall := strings.HasPrefix(trimmed, `{"tool_calls":`) && len(toolCalls) == 0
+
+					if !isPartialToolCall {
+						if len(content) > len(st.LastContent) {
+							delta.Content = content[len(st.LastContent):]
+						} else if content != st.LastContent {
+							delta.Content = content
+						}
+						st.Content.WriteString(delta.Content)
 					}
 					st.LastContent = content
-					st.Content.WriteString(delta.Content)
 				}
 			if len(toolCalls) > 0 {
 				for i := range toolCalls {
@@ -271,13 +279,10 @@ func sseEventToChunk(event SSEEvent, st *StreamState) []ChatCompletionChunk {
 				if event.Message.ID != "" {
 					st.MessageID = event.Message.ID
 				}
-				idx := st.ChunkIndex
-				st.ChunkIndex++
 				isFinished := event.Message.Status == "finished_successfully"
 				if isFinished {
 					st.Finished = true
 				}
-				st.mu.Unlock()
 
 				var finishReason *string
 				if isFinished {
@@ -289,6 +294,9 @@ func sseEventToChunk(event SSEEvent, st *StreamState) []ChatCompletionChunk {
 				}
 
 				if delta.Content != "" || delta.ToolCalls != nil || finishReason != nil {
+					idx := st.ChunkIndex
+					st.ChunkIndex++
+					st.mu.Unlock()
 					chunk := ChatCompletionChunk{
 						Object: "chat.completion.chunk",
 						Choices: []ChunkChoice{{
@@ -301,6 +309,8 @@ func sseEventToChunk(event SSEEvent, st *StreamState) []ChatCompletionChunk {
 						chunk.ConversationID = st.ConvID
 					}
 					chunks = append(chunks, chunk)
+				} else {
+					st.mu.Unlock()
 				}
 			}
 		}
@@ -396,6 +406,7 @@ func extractToolCalls(event SSEEvent) []ToolCall {
 					if calls[i].Type == "" {
 						calls[i].Type = "function"
 					}
+					calls[i].Index = i
 				}
 				return calls
 			}
@@ -420,8 +431,9 @@ func extractToolCalls(event SSEEvent) []ToolCall {
 				id = "call_" + makeRequestID()
 			}
 			return []ToolCall{{
-				ID:   id,
-				Type: "function",
+				ID:    id,
+				Type:  "function",
+				Index: 0,
 				Function: ToolCallFunction{
 					Name:      name,
 					Arguments: args,
@@ -462,7 +474,7 @@ func hashTools(tools []Tool) string {
 	if len(tools) == 0 {
 		return ""
 	}
-	data, err := json.Marshal(tools)
+	data, err := canonicaljson.Marshal(tools)
 	if err != nil {
 		return ""
 	}

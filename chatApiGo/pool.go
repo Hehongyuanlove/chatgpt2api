@@ -47,21 +47,15 @@ func (ms *ManagedSession) available() bool {
 	return ms.State == StateActive || ms.State == StateExpired
 }
 
-type chatgptConvState struct {
-	ConvID      string `json:"convID"`
-	ParentMsgID string `json:"parentMsgID"`
-	ToolDesc    string `json:"toolDesc"`
-}
-
 type convBinding struct {
-	AccountID string    `json:"accountID"`
-	LastUsed  time.Time `json:"lastUsed"`
-	ToolHash  string    `json:"toolHash"`
+	ConversationID string    `json:"conversationID"`
+	AccountID      string    `json:"accountID"`
+	LastUsed       time.Time `json:"lastUsed"`
+	ToolHash       string    `json:"toolHash"`
 }
 
 type convStateFile struct {
-	ConvSessions   map[string]*convBinding        `json:"convSessions"`
-	OpenCodeStates map[string]*chatgptConvState   `json:"opencodeStates"`
+	ConvSessions map[string]*convBinding `json:"convSessions"`
 }
 
 type SessionPool struct {
@@ -73,9 +67,8 @@ type SessionPool struct {
 	closeOnce sync.Once
 	wg       sync.WaitGroup
 
-	convSessions    map[string]*convBinding        // convID → binding{accountID, lastUsed}
+	convSessions    map[string]*convBinding        // sessionID → binding{conversationID, accountID, lastUsed, toolHash}
 	accountSessions map[string]*ManagedSession     // accountID → ManagedSession
-	opencodeStates  map[string]*chatgptConvState
 	statePath       string
 }
 
@@ -85,7 +78,6 @@ func NewSessionPool(cfg *Config) *SessionPool {
 		stopCh:          make(chan struct{}),
 		convSessions:    make(map[string]*convBinding),
 		accountSessions: make(map[string]*ManagedSession),
-		opencodeStates:  make(map[string]*chatgptConvState),
 		statePath:       filepath.Join(cfg.SessionDir, ".conv_state.json"),
 	}
 }
@@ -309,23 +301,18 @@ func (sp *SessionPool) Release(ms *ManagedSession) {
 	atomic.AddInt64(&ms.InFlight, -1)
 }
 
-func (sp *SessionPool) AcquireSticky(ctx context.Context, convID string) (*ManagedSession, error) {
-	if convID != "" {
+func (sp *SessionPool) AcquireSticky(ctx context.Context, sessionID string) (*ManagedSession, error) {
+	if sessionID != "" {
 		sp.mu.RLock()
-		b, ok := sp.convSessions[convID]
+		b, ok := sp.convSessions[sessionID]
 		sp.mu.RUnlock()
-		if ok {
+		if ok && b.AccountID != "" {
 			sp.mu.RLock()
 			ms, hasSession := sp.accountSessions[b.AccountID]
 			sp.mu.RUnlock()
 			if !hasSession {
 				sp.mu.Lock()
-				delete(sp.convSessions, convID)
-				for sid, st := range sp.opencodeStates {
-					if st.ConvID == convID {
-						delete(sp.opencodeStates, sid)
-					}
-				}
+				delete(sp.convSessions, sessionID)
 				sp.mu.Unlock()
 				sp.saveConvState()
 			} else if ms.available() {
@@ -344,8 +331,8 @@ func (sp *SessionPool) AcquireSticky(ctx context.Context, convID string) (*Manag
 	return sp.Acquire(ctx)
 }
 
-func (sp *SessionPool) BindConversation(convID string, ms *ManagedSession) {
-	if convID == "" {
+func (sp *SessionPool) BindConversation(sessionID, convID string, ms *ManagedSession) {
+	if sessionID == "" || convID == "" {
 		return
 	}
 	accountID := ""
@@ -356,7 +343,17 @@ func (sp *SessionPool) BindConversation(convID string, ms *ManagedSession) {
 		return
 	}
 	sp.mu.Lock()
-	sp.convSessions[convID] = &convBinding{AccountID: accountID, LastUsed: time.Now()}
+	if b, ok := sp.convSessions[sessionID]; ok {
+		b.ConversationID = convID
+		b.AccountID = accountID
+		b.LastUsed = time.Now()
+	} else {
+		sp.convSessions[sessionID] = &convBinding{
+			ConversationID: convID,
+			AccountID:      accountID,
+			LastUsed:       time.Now(),
+		}
+	}
 	sp.mu.Unlock()
 	sp.saveConvState()
 }
@@ -365,18 +362,17 @@ func (sp *SessionPool) saveConvState() {
 	sp.mu.RLock()
 	convSessions := make(map[string]*convBinding, len(sp.convSessions))
 	for convID, b := range sp.convSessions {
-		convSessions[convID] = &convBinding{AccountID: b.AccountID, LastUsed: b.LastUsed}
-	}
-	opencodeStates := make(map[string]*chatgptConvState, len(sp.opencodeStates))
-	for k, v := range sp.opencodeStates {
-		cp := *v
-		opencodeStates[k] = &cp
+		convSessions[convID] = &convBinding{
+			ConversationID: b.ConversationID,
+			AccountID:      b.AccountID,
+			LastUsed:       b.LastUsed,
+			ToolHash:       b.ToolHash,
+		}
 	}
 	sp.mu.RUnlock()
 
 	data, err := json.MarshalIndent(convStateFile{
-		ConvSessions:   convSessions,
-		OpenCodeStates: opencodeStates,
+		ConvSessions: convSessions,
 	}, "", "  ")
 	if err != nil {
 		log.Printf("WARN: marshal conv state: %v", err)
@@ -413,12 +409,6 @@ func (sp *SessionPool) loadConvState() {
 		}
 	}
 
-	for sessID, st := range f.OpenCodeStates {
-		if _, ok := sp.convSessions[st.ConvID]; ok {
-			sp.opencodeStates[sessID] = st
-		}
-	}
-
 	restored := len(sp.convSessions)
 	sp.mu.Unlock()
 
@@ -434,27 +424,17 @@ func (sp *SessionPool) loadConvState() {
 	}
 }
 
-func (sp *SessionPool) GetConvState(opencodeSessionID string) (string, string, string) {
-	if opencodeSessionID == "" {
-		return "", "", ""
+func (sp *SessionPool) GetBinding(sessionID string) *convBinding {
+	if sessionID == "" {
+		return nil
 	}
 	sp.mu.RLock()
-	s, ok := sp.opencodeStates[opencodeSessionID]
+	b, ok := sp.convSessions[sessionID]
 	sp.mu.RUnlock()
 	if ok {
-		return s.ConvID, s.ParentMsgID, s.ToolDesc
+		return b
 	}
-	return "", "", ""
-}
-
-func (sp *SessionPool) SetConvState(opencodeSessionID, convID, parentMsgID, toolDesc string) {
-	if opencodeSessionID == "" || convID == "" {
-		return
-	}
-	sp.mu.Lock()
-	sp.opencodeStates[opencodeSessionID] = &chatgptConvState{ConvID: convID, ParentMsgID: parentMsgID, ToolDesc: toolDesc}
-	sp.mu.Unlock()
-	sp.saveConvState()
+	return nil
 }
 
 func (sp *SessionPool) GetConvToolHash(convID string) string {
