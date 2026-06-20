@@ -359,6 +359,9 @@ func (sp *SessionPool) BindConversation(sessionID, convID string, ms *ManagedSes
 }
 
 func (sp *SessionPool) saveConvState() {
+	if sp.cfg.DisableConvState {
+		return
+	}
 	sp.mu.RLock()
 	convSessions := make(map[string]*convBinding, len(sp.convSessions))
 	for convID, b := range sp.convSessions {
@@ -384,6 +387,9 @@ func (sp *SessionPool) saveConvState() {
 }
 
 func (sp *SessionPool) loadConvState() {
+	if sp.cfg.DisableConvState {
+		return
+	}
 	data, err := os.ReadFile(sp.statePath)
 	if err != nil {
 		return
