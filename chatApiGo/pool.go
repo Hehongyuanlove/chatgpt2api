@@ -38,7 +38,8 @@ type ManagedSession struct {
 	lastError error
 	failCount int
 
-	bootstrapped bool
+	bootstrapped  bool
+	bootstrapMu   sync.Mutex
 }
 
 func (ms *ManagedSession) available() bool {
@@ -89,7 +90,7 @@ func (sp *SessionPool) LoadDir(dir string) error {
 	}
 	fmt.Printf("FILE                      EMAIL                              REMAIN     EXPIRES                       PLAN\n")
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
@@ -110,6 +111,10 @@ func (sp *SessionPool) LoadFile(path string) error {
 	sess, err := LoadSession(path)
 	if err != nil {
 		return err
+	}
+
+	if sess.Token() == "" && sess.SessionToken == "" {
+		return fmt.Errorf("no token found, skipping")
 	}
 
 	email := ""
@@ -725,23 +730,34 @@ func (ms *ManagedSession) SendStream(
 		return fmt.Errorf("refresh token: %w", err)
 	}
 
+	ms.bootstrapMu.Lock()
 	if !ms.bootstrapped {
 		log.Println("Bootstrapping session...")
 		if err := ms.Client.Bootstrap(); err != nil {
+			ms.bootstrapMu.Unlock()
 			return fmt.Errorf("bootstrap: %w", err)
 		}
 		ms.bootstrapped = true
 	}
+	ms.bootstrapMu.Unlock()
 
 	req, err := ms.Client.GetChatRequirements()
 	if err != nil {
 		log.Printf("SendStream: GetChatRequirements failed: %v, retrying with re-bootstrap", err)
-		if err2 := ms.Client.Bootstrap(); err2 != nil {
-			return fmt.Errorf("chat requirements after retry bootstrap: %w (original err: %v)", err2, err)
-		}
-		req, err = ms.Client.GetChatRequirements()
-		if err != nil {
-			return fmt.Errorf("chat requirements: %w (after retry)", err)
+		for i := 0; i < 2; i++ {
+			if err2 := ms.Client.Bootstrap(); err2 != nil {
+				log.Printf("SendStream: re-bootstrap attempt %d failed: %v", i+1, err2)
+				if i == 1 {
+					return fmt.Errorf("chat requirements after retry bootstrap: %w (original err: %v)", err2, err)
+				}
+				continue
+			}
+			req, err = ms.Client.GetChatRequirements()
+			if err != nil {
+				log.Printf("SendStream: GetChatRequirements after re-bootstrap attempt %d failed: %v", i+1, err)
+				continue
+			}
+			break
 		}
 	}
 

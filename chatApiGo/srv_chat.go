@@ -42,6 +42,13 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	sessionID := r.Header.Get("X-Session-Id")
 
+	requestID := makeRequestID()
+	sl := newSessionLog(requestID)
+	defer sl.Close()
+
+	sl.WriteHeaders(r.Header)
+	sl.Printf("[STAGE0] incoming request body: %s", string(bodyBytes))
+
 	chatgptConvID := req.ConversationID
 	if chatgptConvID == "" && sessionID != "" {
 		if b := h.pool.GetBinding(sessionID); b != nil && b.ConversationID != "" {
@@ -64,14 +71,13 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestID := makeRequestID()
 	model := convertModel(req.Model)
 
 	var result chatResult
 	if req.Stream {
-		result = h.handleStream(w, r, sess, msgText, chatgptConvID, chatgptParentMsgID, requestID, model, ctx, string(bodyBytes))
+		result = h.handleStream(w, r, sl, sess, msgText, chatgptConvID, chatgptParentMsgID, requestID, model, ctx, string(bodyBytes))
 	} else {
-		result = h.handleNonStream(w, r, sess, msgText, chatgptConvID, chatgptParentMsgID, requestID, model, ctx)
+		result = h.handleNonStream(w, r, sl, sess, msgText, chatgptConvID, chatgptParentMsgID, requestID, model, ctx)
 	}
 	if result.convID != "" {
 		if sessionID == "" {
@@ -83,15 +89,12 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context, requestBody string) chatResult {
+func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sl *sessionLog, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context, requestBody string) chatResult {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "stream_error", "streaming not supported")
 		return chatResult{convID: convID}
 	}
-
-	sl := newSessionLog(requestID)
-	defer sl.Close()
 
 	sl.Printf("[STAGE1] incoming request body: %s", requestBody)
 
@@ -159,9 +162,7 @@ func (h *chatHandler) handleStream(w http.ResponseWriter, r *http.Request, sess 
 	return chatResult{convID: st.ConvID, messageID: st.MessageID}
 }
 
-func (h *chatHandler) handleNonStream(w http.ResponseWriter, r *http.Request, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context) chatResult {
-	sl := newSessionLog(requestID)
-	defer sl.Close()
+func (h *chatHandler) handleNonStream(w http.ResponseWriter, r *http.Request, sl *sessionLog, sess *ManagedSession, msg, convID, parentMsgID, requestID, model string, ctx context.Context) chatResult {
 
 	st := NewStreamState()
 	if parentMsgID != "" {

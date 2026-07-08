@@ -30,7 +30,7 @@ func LoadConfig() *Config {
 		PromptDir:      env("OA_PROMPT_DIR", "prompts"),
 		CleanStaleConv: envBool("OA_CLEAN_STALE_CONV", false),
 		CacheTools:       envBool("OA_CACHE_TOOLS", true),
-		DisableConvState: envBool("OA_DISABLE_CONV_STATE", false),
+		DisableConvState: envBool("OA_DISABLE_CONV_STATE", true),
 	}
 	if cfg.Proxy == "" {
 		for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {

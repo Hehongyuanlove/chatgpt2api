@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -20,6 +21,21 @@ func newSessionLog(requestID string) *sessionLog {
 	sl := &sessionLog{id: requestID}
 	sl.buf = append(sl.buf, fmt.Sprintf("=== Request %s | %s ===\n", requestID, now.Format(time.RFC3339))...)
 	return sl
+}
+
+func (sl *sessionLog) WriteHeaders(header http.Header) {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	if sl.closed {
+		return
+	}
+	sl.buf = append(sl.buf, "--- Headers ---\n"...)
+	for k := range header {
+		for _, v := range header[k] {
+			sl.buf = append(sl.buf, fmt.Sprintf("%s: %s\n", k, v)...)
+		}
+	}
+	sl.buf = append(sl.buf, "---------------\n"...)
 }
 
 func (sl *sessionLog) Printf(format string, args ...interface{}) {
