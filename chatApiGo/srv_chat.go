@@ -41,6 +41,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	sessionID := r.Header.Get("X-Session-Id")
+	identifiedBy := "header"
 
 	requestID := makeRequestID()
 	sl := newSessionLog(requestID)
@@ -50,12 +51,22 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sl.Printf("[STAGE0] incoming request body: %s", string(bodyBytes))
 
 	chatgptConvID := req.ConversationID
+	chatgptParentMsgID := req.ParentMessageID
+
+	if sessionID == "" && chatgptConvID != "" {
+		sessionID = chatgptConvID
+		identifiedBy = "convid"
+	}
+	if sessionID == "" && chatgptParentMsgID != "" {
+		sessionID = chatgptParentMsgID
+		identifiedBy = "parentmsgid"
+	}
 	if chatgptConvID == "" && sessionID != "" {
 		if b := h.pool.GetBinding(sessionID); b != nil && b.ConversationID != "" {
 			chatgptConvID = b.ConversationID
 		}
 	}
-	chatgptParentMsgID := req.ParentMessageID
+	sl.Printf("[STAGE0] resolved convID=%q parentMsgID=%q sessionID=%q identifiedBy=%s", chatgptConvID, chatgptParentMsgID, sessionID, identifiedBy)
 
 	sess, err := h.pool.AcquireSticky(ctx, sessionID)
 	if err != nil {
@@ -80,10 +91,16 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = h.handleNonStream(w, r, sl, sess, msgText, chatgptConvID, chatgptParentMsgID, requestID, model, ctx)
 	}
 	if result.convID != "" {
-		if sessionID == "" {
-			sessionID = result.convID
+		if identifiedBy == "parentmsgid" && result.messageID != "" {
+			oldSID := sessionID
+			sessionID = result.messageID
+			h.pool.MigrateBinding(oldSID, sessionID, result.convID, sess)
+		} else {
+			if sessionID == "" {
+				sessionID = result.convID
+			}
+			h.pool.BindConversation(sessionID, result.convID, sess)
 		}
-		h.pool.BindConversation(sessionID, result.convID, sess)
 		h.pool.SetConvToolHash(sessionID, hashTools(req.Tools))
 		w.Header().Set("X-Session-Id", sessionID)
 	}

@@ -363,6 +363,28 @@ func (sp *SessionPool) BindConversation(sessionID, convID string, ms *ManagedSes
 	sp.saveConvState()
 }
 
+func (sp *SessionPool) MigrateBinding(oldSID, newSID, convID string, ms *ManagedSession) {
+	if oldSID == "" || newSID == "" || convID == "" {
+		return
+	}
+	accountID := ""
+	if ms.Raw != nil && ms.Raw.Account != nil {
+		accountID = ms.Raw.Account.ID
+	}
+	if accountID == "" {
+		return
+	}
+	sp.mu.Lock()
+	delete(sp.convSessions, oldSID)
+	sp.convSessions[newSID] = &convBinding{
+		ConversationID: convID,
+		AccountID:      accountID,
+		LastUsed:       time.Now(),
+	}
+	sp.mu.Unlock()
+	sp.saveConvState()
+}
+
 func (sp *SessionPool) saveConvState() {
 	if sp.cfg.DisableConvState {
 		return
