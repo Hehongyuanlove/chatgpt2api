@@ -7,13 +7,14 @@ import (
 )
 
 type Config struct {
-	Listen         string
-	SessionDir     string
-	Proxy          string
-	APIKey         string
-	MaxConcurrency int
-	Strategy       string
-	PromptDir      string
+	Listen           string
+	SessionDir       string
+	Proxy            string
+	APIKey           string
+	MaxConcurrency   int
+	Strategy         string
+	PromptDir        string
+	SessionIDHeaders []string
 	CleanStaleConv   bool
 	CacheTools       bool
 	DisableConvState bool
@@ -21,14 +22,15 @@ type Config struct {
 
 func LoadConfig() *Config {
 	cfg := &Config{
-		Listen:         env("OA_LISTEN", ":8080"),
-		SessionDir:     env("OA_SESSION_DIR", "."),
-		Proxy:          env("OA_PROXY", ""),
-		APIKey:         env("OA_API_KEY", ""),
-		MaxConcurrency: envInt("OA_MAX_CONCURRENT", 1),
-		Strategy:       env("OA_SESSION_STRATEGY", "round-robin"),
-		PromptDir:      env("OA_PROMPT_DIR", "prompts"),
-		CleanStaleConv: envBool("OA_CLEAN_STALE_CONV", false),
+		Listen:           env("OA_LISTEN", ":8080"),
+		SessionDir:       env("OA_SESSION_DIR", "."),
+		Proxy:            env("OA_PROXY", ""),
+		APIKey:           env("OA_API_KEY", ""),
+		MaxConcurrency:   envInt("OA_MAX_CONCURRENT", 1),
+		Strategy:         env("OA_SESSION_STRATEGY", "round-robin"),
+		PromptDir:        env("OA_PROMPT_DIR", "prompts"),
+		SessionIDHeaders: parseHeaderList(env("OA_SESSION_ID_HEADERS", "X-Session-Id,X-Hermes-Session-Id")),
+		CleanStaleConv:   envBool("OA_CLEAN_STALE_CONV", false),
 		CacheTools:       envBool("OA_CACHE_TOOLS", true),
 		DisableConvState: envBool("OA_DISABLE_CONV_STATE", true),
 	}
@@ -68,4 +70,15 @@ func envBool(key string, def bool) bool {
 		return def
 	}
 	return v == "true" || v == "1" || v == "yes"
+}
+
+func parseHeaderList(s string) []string {
+	var out []string
+	for _, h := range strings.Split(s, ",") {
+		h = strings.TrimSpace(h)
+		if h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
 }

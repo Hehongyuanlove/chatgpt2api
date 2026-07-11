@@ -40,7 +40,13 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	sessionID := r.Header.Get("X-Session-Id")
+	var sessionID string
+	for _, headerName := range h.cfg.SessionIDHeaders {
+		if v := r.Header.Get(headerName); v != "" {
+			sessionID = v
+			break
+		}
+	}
 	identifiedBy := "header"
 
 	requestID := makeRequestID()
